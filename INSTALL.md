@@ -22,6 +22,11 @@ You can install them using your system's package manager. For example, on Debian
 # apt-get install build-essential cmake libpcre2-dev protobuf-compiler
 ```
 
+On Red-hat based systems:
+```
+# dnf install cmake pcre2-devel protobuf-compiler protobuf-devel
+```
+
 4. Build `holod` and `holo-cli`
 
 ```

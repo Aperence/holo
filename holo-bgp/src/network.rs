@@ -10,9 +10,9 @@ use std::sync::Arc;
 
 use holo_utils::capabilities;
 use holo_utils::ip::{AddressFamily, IpAddrExt, IpAddrKind};
+#[cfg(not(feature = "testing"))]
 use holo_utils::socket::{
-    OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
-    TcpListener, TcpSocket, TcpSocketExt, TcpStream, TcpStreamExt,
+    ConnInfo, MultiStream, MultiStreamReader, MultiStreamWriter, SocketExt, TcpListener, TcpSocket, TcpSocketExt, TcpStream, TTL_MAX
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::SendError;
@@ -141,7 +141,7 @@ pub(crate) async fn connect(
     ttl_security: Option<u8>,
     tcp_mss: Option<u16>,
     tcp_password: &Option<String>,
-) -> Result<(TcpStream, TcpConnInfo), Error> {
+) -> Result<(TcpStream, ConnInfo), Error> {
     let af = remote_addr.address_family();
 
     // Create TCP socket.
@@ -202,17 +202,20 @@ pub(crate) async fn connect(
 }
 
 #[cfg(not(feature = "testing"))]
-pub(crate) async fn nbr_write_loop(
-    mut stream: OwnedWriteHalf,
+pub(crate) async fn nbr_write_loop<W>(
+    mut stream: W,
     mut cxt: EncodeCxt,
     mut nbr_msg_txc: UnboundedReceiver<NbrTxMsg>,
-) {
+) 
+where 
+    W: MultiStreamWriter
+{
     while let Some(msg) = nbr_msg_txc.recv().await {
         match msg {
             // Send message to the peer.
             NbrTxMsg::SendMessage { msg, .. } => {
                 let buf = msg.encode(&cxt);
-                if let Err(error) = stream.write_all(&buf).await {
+                if let Err(error) = stream.write_stream_all(&buf, 0).await {
                     IoError::TcpSendError(error).log();
                 }
             }
@@ -220,7 +223,7 @@ pub(crate) async fn nbr_write_loop(
             NbrTxMsg::SendMessageList { msg_list, .. } => {
                 for msg in msg_list {
                     let buf = msg.encode(&cxt);
-                    if let Err(error) = stream.write_all(&buf).await {
+                    if let Err(error) = stream.write_stream_all(&buf, 0).await {
                         IoError::TcpSendError(error).log();
                     }
                 }
@@ -232,19 +235,22 @@ pub(crate) async fn nbr_write_loop(
 }
 
 #[cfg(not(feature = "testing"))]
-pub(crate) async fn nbr_read_loop(
-    mut stream: OwnedReadHalf,
+pub(crate) async fn nbr_read_loop<R>(
+    mut stream: R,
     nbr_addr: IpAddr,
     mut cxt: DecodeCxt,
     nbr_msg_rxp: Sender<NbrRxMsg>,
-) -> Result<(), SendError<NbrRxMsg>> {
+) -> Result<(), SendError<NbrRxMsg>> 
+where 
+    R: MultiStreamReader
+{
     const BUF_SIZE: usize = 65535;
     let mut buf = [0; BUF_SIZE];
     let mut data = Vec::with_capacity(BUF_SIZE);
 
     loop {
         // Read data from the network.
-        match stream.read(&mut buf).await {
+        match stream.read_stream(&mut buf, 0).await {
             Ok(0) => {
                 // Notify that the connection was closed by the remote end.
                 let msg = NbrRxMsg {

@@ -14,7 +14,7 @@ use bitflags::bitflags;
 use chrono::{DateTime, Utc};
 use holo_utils::ip::AddressFamily;
 use holo_utils::mpls::Label;
-use holo_utils::socket::{TcpConnInfo, TcpStream};
+use holo_utils::socket::{ConnInfo, TcpStream};
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
 use ipnetwork::IpNetwork;
 use tokio::sync::mpsc;
@@ -58,7 +58,7 @@ pub struct Neighbor {
     pub trans_addr: IpAddr,
     pub state: fsm::State,
     pub cfg_seqno: u32,
-    pub conn_info: Option<TcpConnInfo>,
+    pub conn_info: Option<ConnInfo>,
     pub max_pdu_len: u16,
     pub init_attempts: usize,
     pub kalive_holdtime_rcvd: Option<u16>,
@@ -473,7 +473,7 @@ impl Neighbor {
     pub(crate) fn setup_connection(
         &mut self,
         stream: TcpStream,
-        conn_info: TcpConnInfo,
+        conn_info: ConnInfo,
         local_lsr_id: Ipv4Addr,
         nbr_pdu_rxp: &Sender<NbrRxPduMsg>,
         #[cfg(feature = "testing")] proto_output_tx: &Sender<ProtocolOutputMsg>,

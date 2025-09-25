@@ -16,16 +16,19 @@ use serde::{Deserialize, Serialize};
 pub use {
     socket2::Socket,
     tokio::io::unix::AsyncFd,
+    tokio::io::{
+        AsyncReadExt, AsyncWriteExt, AsyncRead, AsyncWrite
+    },
     tokio::net::{
         TcpListener, TcpSocket, TcpStream, UdpSocket, tcp::OwnedReadHalf,
-        tcp::OwnedWriteHalf,
+        tcp::OwnedWriteHalf
     },
 };
 
-// TCP connection information.
+// TCP/QUIC connection information.
 #[derive(Debug)]
 #[derive(Deserialize, Serialize)]
-pub struct TcpConnInfo {
+pub struct ConnInfo {
     pub local_addr: IpAddr,
     pub local_port: u16,
     pub remote_addr: IpAddr,
@@ -368,10 +371,39 @@ pub trait TcpSocketExt: SocketExt {
     }
 }
 
-// Extension methods for TcpStream.
-pub trait TcpStreamExt: TcpSocketExt {
-    // Returns address and port information about the TCP connection.
-    fn conn_info(&self) -> Result<TcpConnInfo>;
+pub trait MultiStreamWriter
+where 
+    Self: Send
+{
+    fn write_stream(&mut self, buf: &[u8], stream_id: u32) -> impl Future<Output = Result<usize>> + Send;
+    
+    fn write_stream_all(&mut self, buf: &[u8], stream_id: u32) -> impl Future<Output = Result<()>> + Send {
+        async move {
+            let mut written = 0;
+            while written < buf.len(){
+                let n = self.write_stream(&buf[written..], stream_id).await?;
+                written += n;
+            }
+            Ok(())
+        }
+    }
+}
+
+pub trait MultiStreamReader
+where 
+    Self: Send
+{
+    fn read_stream(&mut self, buf: &mut [u8], stream_id: u32) -> impl Future<Output = Result<usize>> + Send;
+}
+
+pub trait MultiStream<R, W>
+where
+    Self: Send,
+    R: MultiStreamReader,
+    W: MultiStreamWriter
+{
+    fn conn_info(&self) -> Result<ConnInfo>;
+    fn split(self) -> (R, W);
 }
 
 // Extension methods for Socket.
@@ -444,21 +476,6 @@ impl SocketExt for TcpStream {}
 #[cfg(not(feature = "testing"))]
 impl TcpSocketExt for TcpStream {}
 
-#[cfg(not(feature = "testing"))]
-impl TcpStreamExt for TcpStream {
-    fn conn_info(&self) -> Result<TcpConnInfo> {
-        let local_addr = self.local_addr()?;
-        let remote_addr = self.peer_addr()?;
-
-        Ok(TcpConnInfo {
-            local_addr: local_addr.ip(),
-            local_port: local_addr.port(),
-            remote_addr: remote_addr.ip(),
-            remote_port: remote_addr.port(),
-        })
-    }
-}
-
 // ===== impl TcpListener =====
 
 #[cfg(not(feature = "testing"))]
@@ -490,6 +507,44 @@ impl LinkAddrExt for LinkAddr {
         }
         .unwrap()
     }
+}
+
+
+// ===== impl MultiStreamReader =====
+
+impl MultiStreamReader for OwnedReadHalf{
+    async fn read_stream(&mut self, buf: &mut [u8], _stream_id: u32) -> Result<usize> {
+        self.read(buf).await
+    }
+}
+
+// ===== impl MultiStreamWriter=====
+
+impl MultiStreamWriter for OwnedWriteHalf{
+    async fn write_stream(&mut self, buf: &[u8], _stream_id: u32) -> Result<usize> {
+        self.write(buf).await
+    }
+}
+
+// ===== impl AbstractStreams =====
+
+impl MultiStream<OwnedReadHalf, OwnedWriteHalf> for TcpStream{
+    fn conn_info(&self) -> Result<ConnInfo> {
+        let local_addr = self.local_addr()?;
+        let remote_addr = self.peer_addr()?;
+
+        Ok(ConnInfo {
+            local_addr: local_addr.ip(),
+            local_port: local_addr.port(),
+            remote_addr: remote_addr.ip(),
+            remote_port: remote_addr.port(),
+        })
+    }
+    
+    fn split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
+        self.into_split()
+    }
+    
 }
 
 // ===== impl Socket =====

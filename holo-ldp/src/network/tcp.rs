@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use holo_utils::capabilities;
 use holo_utils::socket::{
-    OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
-    TcpListener, TcpSocket, TcpSocketExt, TcpStream, TcpStreamExt,
+    OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, ConnInfo,
+    TcpListener, TcpSocket, TcpSocketExt, TcpStream, MultiStream,
 };
 use holo_utils::task::TimeoutTask;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -120,7 +120,7 @@ pub(crate) async fn connect(
     remote_addr: IpAddr,
     gtsm: bool,
     password: &Option<String>,
-) -> Result<(TcpStream, TcpConnInfo), Error> {
+) -> Result<(TcpStream, ConnInfo), Error> {
     // Create TCP socket.
     let socket =
         connect_socket(local_addr, gtsm).map_err(IoError::TcpSocketError)?;

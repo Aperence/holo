@@ -7,7 +7,7 @@
 use std::sync::{Arc, atomic};
 use std::time::Duration;
 
-use holo_utils::socket::{OwnedReadHalf, OwnedWriteHalf, TcpListener};
+use holo_utils::socket::{MultiStreamReader, MultiStreamWriter, TcpListener};
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
 use tokio::time::sleep;
@@ -56,7 +56,7 @@ pub mod messages {
     use holo_utils::policy::{
         DefaultPolicyType, MatchSets, Policy, PolicyResult, PolicyType,
     };
-    use holo_utils::socket::{TcpConnInfo, TcpStream};
+    use holo_utils::socket::{ConnInfo, TcpStream};
     use ipnetwork::IpNetwork;
     use serde::{Deserialize, Serialize};
 
@@ -87,14 +87,14 @@ pub mod messages {
         pub struct TcpAcceptMsg {
             #[serde(skip)]
             pub stream: Option<TcpStream>,
-            pub conn_info: TcpConnInfo,
+            pub conn_info: ConnInfo,
         }
 
         #[derive(Debug, Deserialize, Serialize)]
         pub struct TcpConnectMsg {
             #[serde(skip)]
             pub stream: Option<TcpStream>,
-            pub conn_info: TcpConnInfo,
+            pub conn_info: ConnInfo,
         }
 
         #[derive(Debug, Deserialize, Serialize)]
@@ -290,12 +290,15 @@ pub(crate) fn tcp_connect(
 }
 
 // Neighbor TCP Rx task.
-pub(crate) fn nbr_rx(
+pub(crate) fn nbr_rx<R>(
     nbr: &Neighbor,
     cxt: DecodeCxt,
-    read_half: OwnedReadHalf,
+    read_half: R,
     nbr_msg_rxp: &Sender<messages::input::NbrRxMsg>,
-) -> Task<()> {
+) -> Task<()> 
+where 
+    R: MultiStreamReader + 'static
+{
     #[cfg(not(feature = "testing"))]
     {
         let span1 = debug_span!("neighbor", addr = %nbr.remote_addr);
@@ -348,15 +351,18 @@ pub(crate) fn nbr_rx(
 
 // Neighbor TCP Tx task.
 #[cfg_attr(not(feature = "testing"), allow(unused_mut))]
-pub(crate) fn nbr_tx(
+pub(crate) fn nbr_tx<W>(
     nbr: &Neighbor,
     cxt: EncodeCxt,
-    write_half: OwnedWriteHalf,
+    write_half: W,
     mut msg_txc: UnboundedReceiver<messages::output::NbrTxMsg>,
     #[cfg(feature = "testing")] proto_output_tx: &Sender<
         messages::ProtocolOutputMsg,
     >,
-) -> Task<()> {
+) -> Task<()> 
+where
+    W: MultiStreamWriter + 'static
+{
     #[cfg(not(feature = "testing"))]
     {
         let span1 = debug_span!("neighbor", addr = %nbr.remote_addr);

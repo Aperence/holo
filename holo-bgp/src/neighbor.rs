@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use holo_protocol::InstanceChannelsTx;
 use holo_utils::bgp::{AfiSafi, RouteType, WellKnownCommunities};
 use holo_utils::ibus::IbusChannelsTx;
-use holo_utils::socket::{TTL_MAX, TcpConnInfo, TcpStream};
+use holo_utils::socket::{TTL_MAX, ConnInfo, TcpStream};
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
 use num_traits::{FromPrimitive, ToPrimitive};
 use tokio::sync::mpsc;
@@ -53,7 +53,7 @@ pub struct Neighbor {
     pub config: NeighborCfg,
     pub state: fsm::State,
     pub peer_type: PeerType,
-    pub conn_info: Option<TcpConnInfo>,
+    pub conn_info: Option<ConnInfo>,
     pub shared_subnet: bool,
     pub identifier: Option<Ipv4Addr>,
     pub holdtime_nego: Option<u16>,
@@ -127,7 +127,7 @@ pub type Neighbors = BTreeMap<IpAddr, Neighbor>;
 
 // Finite State Machine.
 pub mod fsm {
-    use holo_utils::socket::{TcpConnInfo, TcpStream};
+    use holo_utils::socket::{ConnInfo, TcpStream};
     use serde::{Deserialize, Serialize};
 
     use crate::packet::error::DecodeError;
@@ -156,7 +156,7 @@ pub mod fsm {
         Stop(Option<NotificationMsg>),
         // Tcp_CR_Acked
         // TcpConnectionConfirmed
-        Connected(TcpStream, TcpConnInfo),
+        Connected(TcpStream, ConnInfo),
         // TcpConnectionFails
         ConnFail,
         // BGPHeaderErr
@@ -515,7 +515,7 @@ impl Neighbor {
     fn connection_setup(
         &mut self,
         stream: TcpStream,
-        conn_info: TcpConnInfo,
+        conn_info: ConnInfo,
         instance: &mut InstanceUpView<'_>,
     ) {
         // Store TCP connection information.
