@@ -35,6 +35,11 @@ pub enum IoError {
     TcpAuthError(std::io::Error),
     TcpRecvError(std::io::Error),
     TcpSendError(std::io::Error),
+
+    QuicSocketError(std::io::Error),
+    QuicAcceptError(std::io::Error),
+    QuicConnectError(std::io::Error),
+    QuicInfoError(std::io::Error),
 }
 
 // Neighbor Rx errors.
@@ -121,7 +126,11 @@ impl IoError {
             | IoError::TcpAuthError(error)
             | IoError::TcpInfoError(error)
             | IoError::TcpRecvError(error)
-            | IoError::TcpSendError(error) => {
+            | IoError::TcpSendError(error) 
+            | IoError::QuicSocketError(error)
+            | IoError::QuicAcceptError(error)
+            | IoError::QuicConnectError(error)
+            | IoError::QuicInfoError(error) => {
                 warn!(error = %with_source(error), "{}", self);
             }
         }
@@ -132,29 +141,44 @@ impl std::fmt::Display for IoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             IoError::TcpSocketError(..) => {
-                write!(f, "failed to create TCP socket")
-            }
+                                write!(f, "failed to create TCP socket")
+                            }
             IoError::TcpAcceptError(..) => {
-                write!(f, "failed to accept connection request")
-            }
+                                write!(f, "failed to accept connection request")
+                            }
             IoError::TcpConnectError(..) => {
-                write!(f, "failed to establish TCP connection")
-            }
+                                write!(f, "failed to establish TCP connection")
+                            }
             IoError::TcpAuthError(..) => {
-                write!(f, "failed to set TCP authentication option")
-            }
+                                write!(f, "failed to set TCP authentication option")
+                            }
             IoError::TcpInfoError(..) => {
-                write!(
-                    f,
-                    "failed to fetch address and port information from the socket"
-                )
-            }
+                                write!(
+                                    f,
+                                    "failed to fetch address and port information from the socket"
+                                )
+                            }
             IoError::TcpRecvError(..) => {
-                write!(f, "failed to read TCP data")
-            }
+                                write!(f, "failed to read TCP data")
+                            }
             IoError::TcpSendError(..) => {
-                write!(f, "failed to send TCP data")
-            }
+                                write!(f, "failed to send TCP data")
+                            }
+            IoError::QuicAcceptError(error)=> {
+                                write!(f, "failed to accept QUIC connection request")
+                            },
+            IoError::QuicInfoError(error) => {
+                                write!(
+                                    f,
+                                    "failed to fetch address and port information from the QUIC socket"
+                                )
+                            },
+            IoError::QuicSocketError(error) => {
+                                write!(f, "failed to create QUIC socket")
+                            },
+            IoError::QuicConnectError(error) => {
+                                write!(f, "failed to establish QUIC connection")
+                            },
         }
     }
 }
@@ -168,7 +192,11 @@ impl std::error::Error for IoError {
             | IoError::TcpAuthError(error)
             | IoError::TcpInfoError(error)
             | IoError::TcpRecvError(error)
-            | IoError::TcpSendError(error) => Some(error),
+            | IoError::TcpSendError(error)
+            | IoError::QuicSocketError(error)
+            | IoError::QuicAcceptError(error)
+            | IoError::QuicConnectError(error)
+            | IoError::QuicInfoError(error) => Some(error),
         }
     }
 }

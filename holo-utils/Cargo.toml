@@ -33,6 +33,9 @@ yang3.workspace = true
 
 holo-yang = { path = "../holo-yang" }
 reqwest = { version = "0.12.8", optional = true }
+tokio-quiche = "0.9.0"
+tokio-stream = "0.1.17"
+futures-util = "0.3.31"
 
 [lints.rust]
 rust_2018_idioms = "warn"

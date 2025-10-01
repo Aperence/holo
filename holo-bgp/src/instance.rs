@@ -33,7 +33,7 @@ use crate::tasks::messages::input::{
 };
 use crate::tasks::messages::output::PolicyApplyMsg;
 use crate::tasks::messages::{ProtocolInputMsg, ProtocolOutputMsg};
-use crate::{events, ibus, network, tasks};
+use crate::{events, ibus, network_tcp, tasks};
 
 #[derive(Debug)]
 pub struct Instance {
@@ -326,7 +326,7 @@ impl InstanceState {
 
         // Create TCP listeners.
         for af in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
-            let socket = network::listen_socket(af)
+            let socket = network_tcp::listen_socket(af)
                 .map(Arc::new)
                 .map_err(IoError::TcpSocketError)?;
             let task = tasks::tcp_listener(
@@ -508,6 +508,14 @@ fn process_protocol_msg(
                 msg.stream(),
                 msg.conn_info,
             )?;
+        }
+        // Accepted QUIC connection request.
+        ProtocolInputMsg::QuicAccept(mut msg) => {
+            // TODO
+        }
+        // Established QUIC connection.
+        ProtocolInputMsg::QuicConnect(mut msg) => {
+            // TODO
         }
         // Received message from neighbor.
         ProtocolInputMsg::NbrRx(msg) => {

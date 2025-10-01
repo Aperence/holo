@@ -11,8 +11,8 @@ use std::sync::Arc;
 use holo_utils::capabilities;
 use holo_utils::ip::{AddressFamily, IpAddrExt, IpAddrKind};
 use holo_utils::socket::{
-    OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, TcpConnInfo,
-    TcpListener, TcpSocket, TcpSocketExt, TcpStream, TcpStreamExt,
+    OwnedReadHalf, OwnedWriteHalf, SocketExt, TTL_MAX, ConnInfo,
+    TcpListener, TcpSocket, TcpSocketExt, TcpStream, ConnInfoExt,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::mpsc::error::SendError;
@@ -141,7 +141,7 @@ pub(crate) async fn connect(
     ttl_security: Option<u8>,
     tcp_mss: Option<u16>,
     tcp_password: &Option<String>,
-) -> Result<(TcpStream, TcpConnInfo), Error> {
+) -> Result<(TcpStream, ConnInfo), Error> {
     let af = remote_addr.address_family();
 
     // Create TCP socket.

@@ -4,20 +4,23 @@
 // SPDX-License-Identifier: MIT
 //
 
-use std::sync::{Arc, atomic};
+use std::sync::{atomic, Arc};
 use std::time::Duration;
 
 use holo_utils::socket::{OwnedReadHalf, OwnedWriteHalf, TcpListener};
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
+use tokio_quiche::metrics::DefaultMetrics;
+use tokio_quiche::QuicConnectionStream;
 use tracing::{Instrument, debug_span, error};
 
 use crate::debug::Debug;
 use crate::error::NbrRxError;
 use crate::neighbor::{Neighbor, fsm};
 use crate::packet::message::{DecodeCxt, EncodeCxt, KeepaliveMsg, Message};
-use crate::{network, policy};
+use crate::{network_tcp, network_quic, policy};
 
 //
 // BGP tasks diagram:
@@ -48,6 +51,7 @@ use crate::{network, policy};
 
 // BGP inter-task message types.
 pub mod messages {
+    use std::fmt::Debug;
     use std::collections::BTreeSet;
     use std::net::IpAddr;
     use std::sync::Arc;
@@ -56,7 +60,7 @@ pub mod messages {
     use holo_utils::policy::{
         DefaultPolicyType, MatchSets, Policy, PolicyResult, PolicyType,
     };
-    use holo_utils::socket::{TcpConnInfo, TcpStream};
+    use holo_utils::socket::{ConnInfo, TcpStream};
     use ipnetwork::IpNetwork;
     use serde::{Deserialize, Serialize};
 
@@ -71,12 +75,16 @@ pub mod messages {
 
     // Input messages (child task -> main task).
     pub mod input {
+        use holo_utils::quic::QuicSocket;
+
         use super::*;
 
         #[derive(Debug, Deserialize, Serialize)]
         pub enum ProtocolMsg {
             TcpAccept(TcpAcceptMsg),
             TcpConnect(TcpConnectMsg),
+            QuicAccept(QuicAcceptMsg),
+            QuicConnect(QuicConnectMsg),
             NbrRx(NbrRxMsg),
             NbrTimer(NbrTimerMsg),
             PolicyResult(PolicyResultMsg),
@@ -87,14 +95,14 @@ pub mod messages {
         pub struct TcpAcceptMsg {
             #[serde(skip)]
             pub stream: Option<TcpStream>,
-            pub conn_info: TcpConnInfo,
+            pub conn_info: ConnInfo,
         }
 
         #[derive(Debug, Deserialize, Serialize)]
         pub struct TcpConnectMsg {
             #[serde(skip)]
             pub stream: Option<TcpStream>,
-            pub conn_info: TcpConnInfo,
+            pub conn_info: ConnInfo,
         }
 
         #[derive(Debug, Deserialize, Serialize)]
@@ -149,6 +157,35 @@ pub mod messages {
                 }
             }
         }
+
+        // Quic messages
+
+        #[derive(Deserialize, Serialize)]
+        pub struct QuicConnectMsg {
+            #[serde(skip)]
+            pub conn: Option<QuicSocket>,
+            pub conn_info: ConnInfo,
+        }
+
+        impl Debug for QuicConnectMsg{
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("QuicConnectMsg").field("conn_info", &self.conn_info).finish()
+            }
+        }
+
+        #[derive(Deserialize, Serialize)]
+        pub struct QuicAcceptMsg {
+            #[serde(skip)]
+            pub conn: Option<QuicSocket>,
+            pub conn_info: ConnInfo,
+        }
+
+        impl Debug for QuicAcceptMsg{
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct("QuicAcceptMsg").field("conn_info", &self.conn_info).finish()
+            }
+        }
+
     }
 
     // Output messages (main task -> child task).
@@ -221,7 +258,7 @@ pub(crate) fn tcp_listener(
         let tcp_acceptp = tcp_acceptp.clone();
         Task::spawn(
             async move {
-                let _ = network::listen_loop(session_socket, tcp_acceptp).await;
+                let _ = network_tcp::listen_loop(session_socket, tcp_acceptp).await;
             }
             .in_current_span(),
         )
@@ -252,7 +289,7 @@ pub(crate) fn tcp_connect(
         Task::spawn(
             async move {
                 loop {
-                    let result = network::connect(
+                    let result = network_tcp::connect(
                         remote_addr,
                         local_addr,
                         ttl,
@@ -317,7 +354,7 @@ pub(crate) fn nbr_rx(
                 let worker_task = {
                     let nbr_msg_rxp = nbr_msg_rxp.clone();
                     Task::spawn(async move {
-                        let _ = network::nbr_read_loop(
+                        let _ = network_tcp::nbr_read_loop(
                             read_half,
                             nbr_addr,
                             cxt,
@@ -366,7 +403,7 @@ pub(crate) fn nbr_tx(
 
         Task::spawn(
             async move {
-                network::nbr_write_loop(write_half, cxt, msg_txc).await;
+                network_tcp::nbr_write_loop(write_half, cxt, msg_txc).await;
             }
             .in_current_span(),
         )
@@ -383,6 +420,88 @@ pub(crate) fn nbr_tx(
         })
     }
 }
+
+// QUIC listening task.
+pub(crate) fn quic_listener(
+    session_socket: &Arc<Mutex<QuicConnectionStream<DefaultMetrics>>>,
+    quic_acceptp: &Sender<messages::input::QuicAcceptMsg>,
+) -> Task<()> {
+    #[cfg(not(feature = "testing"))]
+    {
+        let span1 = debug_span!("session");
+        let _span1_guard = span1.enter();
+        let span2 = debug_span!("input");
+        let _span2_guard = span2.enter();
+
+        let session_socket = session_socket.clone();
+        let quic_acceptp = quic_acceptp.clone();
+        Task::spawn(
+            async move {
+                let _ = network_quic::listen_loop(session_socket, quic_acceptp).await;
+            }
+            .in_current_span(),
+        )
+    }
+    #[cfg(feature = "testing")]
+    {
+        Task::spawn(async move { std::future::pending().await })
+    }
+}
+
+/* 
+// QUIC connect task.
+pub(crate) fn quic_connect(
+    nbr: &Neighbor,
+    quic_connectp: &Sender<messages::input::QuicConnectMsg>,
+) -> Task<()> {
+    #[cfg(not(feature = "testing"))]
+    {
+        let span = debug_span!("neighbor", addr = %nbr.remote_addr);
+        let _span_guard = span.enter();
+
+        let remote_addr = nbr.remote_addr;
+        let local_addr = nbr.config.transport.local_addr;
+        let ttl = nbr.tx_ttl();
+        let ttl_security = nbr.config.transport.ttl_security;
+        let quic_connectp = quic_connectp.clone();
+        Task::spawn(
+            async move {
+                loop {
+                    let result = network_quic::connect(
+                        remote_addr,
+                        local_addr,
+                        ttl,
+                        ttl_security,
+                    )
+                    .await;
+
+                    match result {
+                        Ok((stream, conn_info)) => {
+                            // Send message to the parent BGP task.
+                            let msg = messages::input::QuicConnectMsg {
+                                stream: Some(stream),
+                                conn_info,
+                            };
+                            let _ = quic_connectp.send(msg).await;
+                            return;
+                        }
+                        Err(error) => {
+                            error.log();
+                            // Wait one second before trying again.
+                            sleep(Duration::from_secs(1)).await;
+                        }
+                    }
+                }
+            }
+            .in_current_span(),
+        )
+    }
+    #[cfg(feature = "testing")]
+    {
+        Task::spawn(async move { std::future::pending().await })
+    }
+}
+*/
 
 // Neighbor timer task.
 pub(crate) fn nbr_timer(

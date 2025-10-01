@@ -10,7 +10,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use chrono::Utc;
 use holo_utils::ip::IpNetworkKind;
 use holo_utils::mpls::Label;
-use holo_utils::socket::{SocketExt, TTL_MAX, TcpConnInfo, TcpStream};
+use holo_utils::socket::{SocketExt, TTL_MAX, ConnInfo, TcpStream};
 use tracing::{Span, debug_span};
 
 use crate::collections::{
@@ -349,7 +349,7 @@ pub(crate) fn process_adj_timeout(
 pub(crate) fn process_tcp_accept(
     instance: &mut InstanceUpView<'_>,
     stream: TcpStream,
-    conn_info: TcpConnInfo,
+    conn_info: ConnInfo,
 ) {
     // Lookup neighbor.
     let source = conn_info.remote_addr;
@@ -401,7 +401,7 @@ pub(crate) fn process_tcp_connect(
     instance: &mut InstanceUpView<'_>,
     nbr_id: NeighborId,
     stream: TcpStream,
-    conn_info: TcpConnInfo,
+    conn_info: ConnInfo,
 ) -> Result<(), Error> {
     // Lookup neighbor.
     let (nbr_idx, nbr) = instance.state.neighbors.get_mut_by_id(nbr_id)?;

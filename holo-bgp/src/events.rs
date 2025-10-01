@@ -12,7 +12,7 @@ use holo_utils::bgp::RouteType;
 use holo_utils::ibus::IbusChannelsTx;
 use holo_utils::ip::{IpAddrKind, IpNetworkKind};
 use holo_utils::policy::{PolicyResult, PolicyType};
-use holo_utils::socket::{TcpConnInfo, TcpStream};
+use holo_utils::socket::{ConnInfo, TcpStream};
 use ipnetwork::IpNetwork;
 use num_traits::FromPrimitive;
 
@@ -29,7 +29,7 @@ use crate::packet::message::{
 use crate::policy::RoutePolicyInfo;
 use crate::rib::{AttrSetsCxt, Rib, Route, RouteOrigin, RoutingTable};
 use crate::tasks::messages::output::PolicyApplyMsg;
-use crate::{network, rib};
+use crate::{network_tcp, rib};
 
 // ===== TCP connection request =====
 
@@ -37,7 +37,7 @@ pub(crate) fn process_tcp_accept(
     instance: &mut InstanceUpView<'_>,
     neighbors: &mut Neighbors,
     stream: TcpStream,
-    conn_info: TcpConnInfo,
+    conn_info: ConnInfo,
 ) -> Result<(), Error> {
     // Lookup neighbor.
     let Some(nbr) = neighbors.get_mut(&conn_info.remote_addr) else {
@@ -51,7 +51,7 @@ pub(crate) fn process_tcp_accept(
     }
 
     // Initialize the accepted stream.
-    network::accepted_stream_init(
+    network_tcp::accepted_stream_init(
         &stream,
         nbr.remote_addr.address_family(),
         nbr.tx_ttl(),
@@ -72,7 +72,7 @@ pub(crate) fn process_tcp_connect(
     instance: &mut InstanceUpView<'_>,
     neighbors: &mut Neighbors,
     stream: TcpStream,
-    conn_info: TcpConnInfo,
+    conn_info: ConnInfo,
 ) -> Result<(), Error> {
     // Lookup neighbor.
     let Some(nbr) = neighbors.get_mut(&conn_info.remote_addr) else {

@@ -27,7 +27,7 @@ use holo_yang::TryFromYang;
 use crate::af::{Ipv4Unicast, Ipv6Unicast};
 use crate::instance::{Instance, InstanceUpView};
 use crate::neighbor::{Neighbor, PeerType, fsm};
-use crate::network;
+use crate::network_tcp;
 use crate::packet::consts::{CeaseSubcode, ErrorCode};
 use crate::packet::message::{Message, NotificationMsg};
 use crate::rib::RouteOrigin;
@@ -1590,7 +1590,7 @@ impl Provider for Instance {
                         listener.af == nbr_addr.address_family()
                     })
                 {
-                    network::listen_socket_md5sig_update(
+                    network_tcp::listen_socket_md5sig_update(
                         &listener.socket,
                         &nbr_addr,
                         None,
@@ -1633,7 +1633,7 @@ impl Provider for Instance {
                         listener.af == nbr_addr.address_family()
                     })
                 {
-                    network::listen_socket_md5sig_update(
+                    network_tcp::listen_socket_md5sig_update(
                         &listener.socket,
                         &nbr_addr,
                         key.as_deref(),

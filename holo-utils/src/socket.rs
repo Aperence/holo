@@ -11,10 +11,13 @@ use std::os::unix::io::AsRawFd;
 use libc::{ip_mreqn, packet_mreq};
 use nix::sys::socket::{LinkAddr, SockaddrLike};
 use serde::{Deserialize, Serialize};
+use tokio_quiche::metrics::DefaultMetrics;
+use tokio_quiche::InitialQuicConnection;
+use tokio_stream::wrappers::ReceiverStream;
 // Normal build: re-export standard socket types.
 #[cfg(not(feature = "testing"))]
 pub use {
-    socket2::Socket,
+    socket2::{Socket, Domain, Type, SockAddr},
     tokio::io::unix::AsyncFd,
     tokio::net::{
         TcpListener, TcpSocket, TcpStream, UdpSocket, tcp::OwnedReadHalf,
@@ -23,9 +26,9 @@ pub use {
 };
 
 // TCP connection information.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[derive(Deserialize, Serialize)]
-pub struct TcpConnInfo {
+pub struct ConnInfo {
     pub local_addr: IpAddr,
     pub local_port: u16,
     pub remote_addr: IpAddr,
@@ -45,6 +48,8 @@ pub struct tcp_md5sig {
 }
 
 use crate::ip::{AddressFamily, IpAddrKind};
+#[cfg(not(feature = "testing"))]
+use crate::quic::QuicSocket;
 // Test build: export mock sockets.
 #[cfg(feature = "testing")]
 pub use crate::socket::mock::{
@@ -259,6 +264,10 @@ pub trait SocketExt: Sized + AsRawFd {
             std::mem::size_of::<packet_mreq>() as libc::socklen_t,
         )
     }
+
+    fn set_reuse_address(){
+
+    }
 }
 
 // Extension methods for UdpSocket.
@@ -368,10 +377,10 @@ pub trait TcpSocketExt: SocketExt {
     }
 }
 
-// Extension methods for TcpStream.
-pub trait TcpStreamExt: TcpSocketExt {
-    // Returns address and port information about the TCP connection.
-    fn conn_info(&self) -> Result<TcpConnInfo>;
+// Extension methods for connection information.
+pub trait ConnInfoExt {
+    // Returns address and port information about the L4 connection.
+    fn conn_info(&self) -> Result<ConnInfo>;
 }
 
 // Extension methods for Socket.
@@ -445,12 +454,12 @@ impl SocketExt for TcpStream {}
 impl TcpSocketExt for TcpStream {}
 
 #[cfg(not(feature = "testing"))]
-impl TcpStreamExt for TcpStream {
-    fn conn_info(&self) -> Result<TcpConnInfo> {
+impl ConnInfoExt for TcpStream {
+    fn conn_info(&self) -> Result<ConnInfo> {
         let local_addr = self.local_addr()?;
         let remote_addr = self.peer_addr()?;
 
-        Ok(TcpConnInfo {
+        Ok(ConnInfo {
             local_addr: local_addr.ip(),
             local_port: local_addr.port(),
             remote_addr: remote_addr.ip(),

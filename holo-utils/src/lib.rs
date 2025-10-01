@@ -28,6 +28,7 @@ pub mod num;
 pub mod option;
 pub mod policy;
 pub mod protocol;
+pub mod quic;
 pub mod socket;
 pub mod southbound;
 pub mod sr;
