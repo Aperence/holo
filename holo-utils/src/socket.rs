@@ -11,18 +11,19 @@ use std::os::unix::io::AsRawFd;
 use libc::{ip_mreqn, packet_mreq};
 use nix::sys::socket::{LinkAddr, SockaddrLike};
 use serde::{Deserialize, Serialize};
-use tokio_quiche::metrics::DefaultMetrics;
-use tokio_quiche::InitialQuicConnection;
-use tokio_stream::wrappers::ReceiverStream;
+
 // Normal build: re-export standard socket types.
+pub use socket2::{Domain, Type, SockAddr};
 #[cfg(not(feature = "testing"))]
 pub use {
-    socket2::{Socket, Domain, Type, SockAddr},
+    socket2::Socket,
     tokio::io::unix::AsyncFd,
     tokio::net::{
         TcpListener, TcpSocket, TcpStream, UdpSocket, tcp::OwnedReadHalf,
         tcp::OwnedWriteHalf,
     },
+    tokio_quiche::QuicConnectionStream,
+    crate::quic::{QuicSocket, QuicSocketRead, QuicSocketWrite}
 };
 
 // TCP connection information.
@@ -48,13 +49,11 @@ pub struct tcp_md5sig {
 }
 
 use crate::ip::{AddressFamily, IpAddrKind};
-#[cfg(not(feature = "testing"))]
-use crate::quic::QuicSocket;
 // Test build: export mock sockets.
 #[cfg(feature = "testing")]
 pub use crate::socket::mock::{
     AsyncFd, OwnedReadHalf, OwnedWriteHalf, Socket, TcpListener, TcpSocket,
-    TcpStream, UdpSocket,
+    TcpStream, UdpSocket, QuicConnectionStream, QuicSocket, QuicSocketRead, QuicSocketWrite
 };
 
 // Maximum TTL for IPv4 or Hop Limit for IPv6.
@@ -548,6 +547,8 @@ impl RawSocketExt for Socket {
 // ===== Mock sockets for unit testing =====
 
 pub mod mock {
+    use std::marker::PhantomData;
+
     #[derive(Debug, Default)]
     pub struct AsyncFd<T>(T);
 
@@ -585,6 +586,26 @@ pub mod mock {
     impl TcpStream {
         pub fn into_split(self) -> (OwnedReadHalf, OwnedWriteHalf) {
             (OwnedReadHalf(), OwnedWriteHalf())
+        }
+    }
+
+    #[derive(Debug, Default)]
+    pub struct QuicConnectionStream<T>{
+        _p: PhantomData<T>
+    }
+
+    #[derive(Debug, Default)]
+    pub struct QuicSocketRead();
+
+    #[derive(Debug, Default)]
+    pub struct QuicSocketWrite();
+
+    #[derive(Debug, Default)]
+    pub struct QuicSocket();
+
+    impl QuicSocket {
+        pub fn split(self) -> (QuicSocketRead, QuicSocketWrite) {
+            (QuicSocketRead(), QuicSocketWrite())
         }
     }
 }

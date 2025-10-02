@@ -40,6 +40,8 @@ pub enum IoError {
     QuicAcceptError(std::io::Error),
     QuicConnectError(std::io::Error),
     QuicInfoError(std::io::Error),
+    QuicSendError(std::io::Error),
+    QuicRecvError(std::io::Error)
 }
 
 // Neighbor Rx errors.
@@ -130,7 +132,9 @@ impl IoError {
             | IoError::QuicSocketError(error)
             | IoError::QuicAcceptError(error)
             | IoError::QuicConnectError(error)
-            | IoError::QuicInfoError(error) => {
+            | IoError::QuicInfoError(error)
+            | IoError::QuicSendError(error)
+            | IoError::QuicRecvError(error) => {
                 warn!(error = %with_source(error), "{}", self);
             }
         }
@@ -164,21 +168,27 @@ impl std::fmt::Display for IoError {
             IoError::TcpSendError(..) => {
                                 write!(f, "failed to send TCP data")
                             }
-            IoError::QuicAcceptError(error)=> {
+            IoError::QuicAcceptError(..)=> {
                                 write!(f, "failed to accept QUIC connection request")
                             },
-            IoError::QuicInfoError(error) => {
+            IoError::QuicInfoError(..) => {
                                 write!(
                                     f,
                                     "failed to fetch address and port information from the QUIC socket"
                                 )
                             },
-            IoError::QuicSocketError(error) => {
+            IoError::QuicSocketError(..) => {
                                 write!(f, "failed to create QUIC socket")
                             },
-            IoError::QuicConnectError(error) => {
+            IoError::QuicConnectError(..) => {
                                 write!(f, "failed to establish QUIC connection")
                             },
+            IoError::QuicSendError(..) => {
+                                write!(f, "failed to send QUIC packet")
+                            },
+            IoError::QuicRecvError(..) => {
+                                write!(f, "failed to recv QUIC packet")
+                            }
         }
     }
 }
@@ -196,7 +206,9 @@ impl std::error::Error for IoError {
             | IoError::QuicSocketError(error)
             | IoError::QuicAcceptError(error)
             | IoError::QuicConnectError(error)
-            | IoError::QuicInfoError(error) => Some(error),
+            | IoError::QuicInfoError(error)
+            | IoError::QuicSendError(error)
+            | IoError::QuicRecvError(error) => Some(error),
         }
     }
 }

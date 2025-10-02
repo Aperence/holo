@@ -1,5 +1,5 @@
-use std::{collections::{HashMap, HashSet}, error::Error, fmt::Display, io, net::IpAddr};
-use tokio_quiche::{metrics::{DefaultMetrics, Metrics}, quic::{connect_with_config, HandshakeInfo, QuicheConnection}, quiche::Shutdown, ApplicationOverQuic, ConnectionParams, InitialQuicConnection, QuicConnectionStream, QuicResult};
+use std::{collections::{HashMap, HashSet}, error::Error, fmt::Display, io};
+use tokio_quiche::{metrics::{DefaultMetrics, Metrics}, quic::{connect_with_config, HandshakeInfo, QuicheConnection}, quiche::Shutdown, ApplicationOverQuic, ConnectionParams, InitialQuicConnection, QuicResult};
 use tokio::{net::UdpSocket, select, sync::mpsc::{self, error::{TryRecvError, TrySendError}, Receiver, Sender}};
 use crate::socket::{ConnInfo, ConnInfoExt};
 
@@ -22,18 +22,18 @@ enum CommandResult{
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum RequestError{
+pub enum QuicError{
     ConnClosed,
     StreamClosed
 }
 
-impl Display for RequestError{
+impl Display for QuicError{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
 }
 
-impl Error for RequestError{}
+impl Error for QuicError{}
 
 pub struct QuicSocketRead{
     streams: HashMap<u64, Receiver<Data>>,
@@ -42,17 +42,17 @@ pub struct QuicSocketRead{
 }
 
 impl QuicSocketRead{
-    pub async fn read_stream(&mut self, stream: u64) -> Result<Data, RequestError>{
+    pub async fn read_stream(&mut self, stream: u64) -> Result<Data, QuicError>{
         if !self.streams.contains_key(&stream){
             self.send.send(Command::NewStreamRead(stream))
                 .await.map_err(|_| 
-                    RequestError::ConnClosed
+                    QuicError::ConnClosed
                 )?;
 
             match self.recv.recv().await{
                 Some(CommandResult::NewStreamRead(stream, stream_handle)) => self.streams.insert(stream, stream_handle),
                 Some(_) => todo!("Should handle this impossible case"),
-                None => return Err(RequestError::ConnClosed),
+                None => return Err(QuicError::ConnClosed),
             };
         }
 
@@ -60,21 +60,21 @@ impl QuicSocketRead{
         loop{
             let ret = match self.streams.get_mut(&stream).expect("Impossible error").recv().await{
                 Some(data) if data.len() > 0=> Ok(data),
-                None => Err(RequestError::StreamClosed),
+                None => Err(QuicError::StreamClosed),
                 _ => continue
             };
             return ret;
         }
     }
 
-    pub async fn streams(&mut self) -> Result<HashSet<u64>, RequestError>{
+    pub async fn streams(&mut self) -> Result<HashSet<u64>, QuicError>{
         self.send.send(Command::OpenStreams)
-            .await.map_err(|_| RequestError::ConnClosed)?;
+            .await.map_err(|_| QuicError::ConnClosed)?;
 
         match self.recv.recv().await{
             Some(CommandResult::OpenStreams(data)) => Ok(data),
             Some(_) => todo!("Should handle this impossible case"),
-            None => Err(RequestError::ConnClosed),
+            None => Err(QuicError::ConnClosed),
         }
     }
 }
@@ -86,22 +86,22 @@ pub struct QuicSocketWrite{
 }
 
 impl QuicSocketWrite{
-    pub async fn write_stream(&mut self, data: &[u8], stream: u64) -> Result<(), RequestError>{
+    pub async fn write_stream(&mut self, data: &[u8], stream: u64) -> Result<(), QuicError>{
         if !self.streams.contains_key(&stream){
             self.send.send(Command::NewStreamWrite(stream))
-                .await.map_err(|_| RequestError::ConnClosed)?;
+                .await.map_err(|_| QuicError::ConnClosed)?;
 
             match self.recv.recv().await{
                 Some(CommandResult::NewStreamWrite(stream, stream_handle)) => self.streams.insert(stream, stream_handle),
                 // TODO: handle StreamAlreadyCreated/Closed
                 Some(_) => todo!("Should handle this impossible case"),
-                None => return Err(RequestError::ConnClosed),
+                None => return Err(QuicError::ConnClosed),
             };
         }
 
         match self.streams.get_mut(&stream).expect("Impossible error").send(data.to_vec()).await{
             Ok(data) => Ok(data),
-            Err(_) => Err(RequestError::StreamClosed)
+            Err(_) => Err(QuicError::StreamClosed)
         }
     }
 
@@ -110,6 +110,7 @@ impl QuicSocketWrite{
     }
 }
 
+#[derive(Debug)]
 pub struct QuicSocket{
     conn_info: ConnInfo,
     send: Sender<Command>,
@@ -129,12 +130,12 @@ impl QuicSocket{
         (reader, writer)
     }
 
-    pub async fn wait_connected(&mut self) -> Result<(), RequestError>{
-        self.send.send(Command::Connected).await.map_err(|_| RequestError::ConnClosed)?;
+    pub async fn wait_connected(&mut self) -> Result<(), QuicError>{
+        self.send.send(Command::Connected).await.map_err(|_| QuicError::ConnClosed)?;
 
         match self.recv_read.recv().await{
             Some(CommandResult::Connected) => Ok(()),
-            _ => Err(RequestError::ConnClosed),
+            _ => Err(QuicError::ConnClosed),
         }
     }
 }
@@ -398,7 +399,7 @@ impl ApplicationOverQuic for QuicDriver{
 
     fn on_conn_close<M: Metrics>(
         &mut self, _qconn: &mut QuicheConnection, _metrics: &M,
-        connection_result: &QuicResult<()>,
+        _connection_result: &QuicResult<()>,
     ) {
         //println!("Connection closed: {:?}", connection_result);
     }

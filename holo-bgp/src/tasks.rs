@@ -7,13 +7,11 @@
 use std::sync::{atomic, Arc};
 use std::time::Duration;
 
-use holo_utils::socket::{OwnedReadHalf, OwnedWriteHalf, TcpListener};
+use holo_utils::socket::{OwnedReadHalf, OwnedWriteHalf, TcpListener, QuicConnectionStream, QuicSocketRead, QuicSocketWrite};
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
 use tokio::sync::mpsc::{Sender, UnboundedReceiver, UnboundedSender};
-use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tokio_quiche::metrics::DefaultMetrics;
-use tokio_quiche::QuicConnectionStream;
 use tracing::{Instrument, debug_span, error};
 
 use crate::debug::Debug;
@@ -60,7 +58,7 @@ pub mod messages {
     use holo_utils::policy::{
         DefaultPolicyType, MatchSets, Policy, PolicyResult, PolicyType,
     };
-    use holo_utils::socket::{ConnInfo, TcpStream};
+    use holo_utils::socket::{ConnInfo, TcpStream, QuicSocket};
     use ipnetwork::IpNetwork;
     use serde::{Deserialize, Serialize};
 
@@ -75,8 +73,6 @@ pub mod messages {
 
     // Input messages (child task -> main task).
     pub mod input {
-        use holo_utils::quic::QuicSocket;
-
         use super::*;
 
         #[derive(Debug, Deserialize, Serialize)]
@@ -160,32 +156,45 @@ pub mod messages {
 
         // Quic messages
 
-        #[derive(Deserialize, Serialize)]
+        #[derive(Debug, Deserialize, Serialize)]
         pub struct QuicConnectMsg {
             #[serde(skip)]
             pub conn: Option<QuicSocket>,
             pub conn_info: ConnInfo,
         }
 
-        impl Debug for QuicConnectMsg{
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("QuicConnectMsg").field("conn_info", &self.conn_info).finish()
-            }
-        }
-
-        #[derive(Deserialize, Serialize)]
+        #[derive(Debug, Deserialize, Serialize)]
         pub struct QuicAcceptMsg {
             #[serde(skip)]
             pub conn: Option<QuicSocket>,
             pub conn_info: ConnInfo,
         }
 
-        impl Debug for QuicAcceptMsg{
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.debug_struct("QuicAcceptMsg").field("conn_info", &self.conn_info).finish()
+        impl QuicAcceptMsg {
+            pub(crate) fn connection(&mut self) -> QuicSocket {
+                #[cfg(not(feature = "testing"))]
+                {
+                    self.conn.take().unwrap()
+                }
+                #[cfg(feature = "testing")]
+                {
+                    Default::default()
+                }
             }
         }
 
+        impl QuicConnectMsg {
+            pub(crate) fn connection(&mut self) -> QuicSocket {
+                #[cfg(not(feature = "testing"))]
+                {
+                    self.conn.take().unwrap()
+                }
+                #[cfg(feature = "testing")]
+                {
+                    Default::default()
+                }
+            }
+        }
     }
 
     // Output messages (main task -> child task).
@@ -423,7 +432,7 @@ pub(crate) fn nbr_tx(
 
 // QUIC listening task.
 pub(crate) fn quic_listener(
-    session_socket: &Arc<Mutex<QuicConnectionStream<DefaultMetrics>>>,
+    session_socket: QuicConnectionStream<DefaultMetrics>,
     quic_acceptp: &Sender<messages::input::QuicAcceptMsg>,
 ) -> Task<()> {
     #[cfg(not(feature = "testing"))]
@@ -433,7 +442,6 @@ pub(crate) fn quic_listener(
         let span2 = debug_span!("input");
         let _span2_guard = span2.enter();
 
-        let session_socket = session_socket.clone();
         let quic_acceptp = quic_acceptp.clone();
         Task::spawn(
             async move {
@@ -448,7 +456,6 @@ pub(crate) fn quic_listener(
     }
 }
 
-/* 
 // QUIC connect task.
 pub(crate) fn quic_connect(
     nbr: &Neighbor,
@@ -471,16 +478,16 @@ pub(crate) fn quic_connect(
                         remote_addr,
                         local_addr,
                         ttl,
-                        ttl_security,
+                        ttl_security
                     )
                     .await;
 
                     match result {
-                        Ok((stream, conn_info)) => {
+                        Ok(conn) => {
                             // Send message to the parent BGP task.
                             let msg = messages::input::QuicConnectMsg {
-                                stream: Some(stream),
-                                conn_info,
+                                conn_info: conn.conn_info().expect("Quic socket never fails to get conn_info"),
+                                conn: Some(conn)
                             };
                             let _ = quic_connectp.send(msg).await;
                             return;
@@ -501,7 +508,101 @@ pub(crate) fn quic_connect(
         Task::spawn(async move { std::future::pending().await })
     }
 }
-*/
+
+// Neighbor QUIC Rx task.
+pub(crate) fn quic_nbr_rx(
+    nbr: &Neighbor,
+    cxt: DecodeCxt,
+    read_half: QuicSocketRead,
+    nbr_msg_rxp: &Sender<messages::input::NbrRxMsg>,
+) -> Task<()> {
+    #[cfg(not(feature = "testing"))]
+    {
+        let span1 = debug_span!("neighbor", addr = %nbr.remote_addr);
+        let _span1_guard = span1.enter();
+        let span2 = debug_span!("input");
+        let _span2_guard = span2.enter();
+
+        let nbr_addr = nbr.remote_addr;
+        let nbr_msg_rxp = nbr_msg_rxp.clone();
+
+        // Spawn a supervised task for this neighbor.
+        //
+        // The TCP read loop runs inside an inner supervised task, which lets us
+        // catch panics (for example, from malformed or malicious input) and
+        // handle them gracefully. Rather than propagating the panic, we treat
+        // it as if the TCP connection was closed, containing the failure.
+        Task::spawn(
+            async move {
+                let worker_task = {
+                    let nbr_msg_rxp = nbr_msg_rxp.clone();
+                    Task::spawn(async move {
+                        let _ = network_quic::nbr_read_loop(
+                            read_half,
+                            nbr_addr,
+                            cxt,
+                            nbr_msg_rxp,
+                        )
+                        .await;
+                    })
+                };
+                if let Err(error) = worker_task.await
+                    && error.is_panic()
+                {
+                    error!(%error, "task panicked");
+                    let msg = messages::input::NbrRxMsg {
+                        nbr_addr,
+                        msg: Err(NbrRxError::TcpConnClosed),
+                    };
+                    let _ = nbr_msg_rxp.send(msg).await;
+                }
+            }
+            .in_current_span(),
+        )
+    }
+    #[cfg(feature = "testing")]
+    {
+        Task::spawn(async move { std::future::pending().await })
+    }
+}
+
+// Neighbor TCP Tx task.
+#[cfg_attr(not(feature = "testing"), allow(unused_mut))]
+pub(crate) fn quic_nbr_tx(
+    nbr: &Neighbor,
+    cxt: EncodeCxt,
+    write_half: QuicSocketWrite,
+    mut msg_txc: UnboundedReceiver<messages::output::NbrTxMsg>,
+    #[cfg(feature = "testing")] proto_output_tx: &Sender<
+        messages::ProtocolOutputMsg,
+    >,
+) -> Task<()> {
+    #[cfg(not(feature = "testing"))]
+    {
+        let span1 = debug_span!("neighbor", addr = %nbr.remote_addr);
+        let _span1_guard = span1.enter();
+        let span2 = debug_span!("output");
+        let _span2_guard = span2.enter();
+
+        Task::spawn(
+            async move {
+                network_quic::nbr_write_loop(write_half, cxt, msg_txc).await;
+            }
+            .in_current_span(),
+        )
+    }
+    #[cfg(feature = "testing")]
+    {
+        let proto_output_tx = proto_output_tx.clone();
+        Task::spawn(async move {
+            // Relay message to the test framework.
+            while let Some(msg) = msg_txc.recv().await {
+                let msg = messages::ProtocolOutputMsg::NbrTx(msg);
+                let _ = proto_output_tx.send(msg).await;
+            }
+        })
+    }
+}
 
 // Neighbor timer task.
 pub(crate) fn nbr_timer(

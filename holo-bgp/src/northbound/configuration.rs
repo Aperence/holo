@@ -76,6 +76,7 @@ pub struct InstanceCfg {
     pub afi_safi: BTreeMap<AfiSafi, InstanceAfiSafiCfg>,
     pub reject_as_sets: bool,
     pub trace_opts: InstanceTraceOptions,
+    pub quic: bool
 }
 
 #[derive(Debug)]
@@ -162,6 +163,7 @@ pub struct NeighborTransportCfg {
     pub ttl_security: Option<u8>,
     pub secure_session_enabled: bool,
     pub md5_key: Option<String>,
+    pub quic: bool
 }
 
 #[derive(Debug)]
@@ -1792,6 +1794,7 @@ impl Default for InstanceCfg {
             afi_safi: Default::default(),
             reject_as_sets,
             trace_opts: Default::default(),
+            quic: false
         }
     }
 }
@@ -1896,6 +1899,7 @@ impl Default for NeighborTransportCfg {
             ttl_security: None,
             secure_session_enabled,
             md5_key: None,
+            quic: false
         }
     }
 }

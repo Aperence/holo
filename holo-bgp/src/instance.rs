@@ -30,10 +30,11 @@ use crate::packet::message::NotificationMsg;
 use crate::rib::Rib;
 use crate::tasks::messages::input::{
     NbrRxMsg, NbrTimerMsg, PolicyResultMsg, TcpAcceptMsg, TcpConnectMsg,
+    QuicAcceptMsg, QuicConnectMsg
 };
 use crate::tasks::messages::output::PolicyApplyMsg;
 use crate::tasks::messages::{ProtocolInputMsg, ProtocolOutputMsg};
-use crate::{events, ibus, network_tcp, tasks};
+use crate::{events, ibus, network_quic, network_tcp, tasks};
 
 #[derive(Debug)]
 pub struct Instance {
@@ -92,6 +93,10 @@ pub struct ProtocolInputChannelsTx {
     pub tcp_accept: Sender<TcpAcceptMsg>,
     // TCP connect event.
     pub tcp_connect: Sender<TcpConnectMsg>,
+    // QUIC accept event.
+    pub quic_accept: Sender<QuicAcceptMsg>,
+    // QUIC connect event.
+    pub quic_connect: Sender<QuicConnectMsg>,
     // TCP neighbor message.
     pub nbr_msg_rx: Sender<NbrRxMsg>,
     // Neighbor timeout event.
@@ -108,6 +113,10 @@ pub struct ProtocolInputChannelsRx {
     pub tcp_accept: Receiver<TcpAcceptMsg>,
     // TCP connect event.
     pub tcp_connect: Receiver<TcpConnectMsg>,
+    // QUIC accept event.
+    pub quic_accept: Receiver<QuicAcceptMsg>,
+    // QUIC connect event.
+    pub quic_connect: Receiver<QuicConnectMsg>,
     // TCP neighbor message.
     pub nbr_msg_rx: Receiver<NbrRxMsg>,
     // Neighbor timeout event.
@@ -152,7 +161,7 @@ impl Instance {
     fn start(&mut self, router_id: Ipv4Addr) {
         Debug::InstanceStart.log();
 
-        match InstanceState::new(router_id, &self.tx) {
+        match InstanceState::new(router_id, &self.config, &self.tx) {
             Ok(state) => {
                 // Store instance initial state.
                 self.state = Some(state);
@@ -284,6 +293,8 @@ impl ProtocolInstance for Instance {
     -> (ProtocolInputChannelsTx, ProtocolInputChannelsRx) {
         let (tcp_acceptp, tcp_acceptc) = mpsc::channel(4);
         let (tcp_connectp, tcp_connectc) = mpsc::channel(4);
+        let (quic_acceptp, quic_acceptc) = mpsc::channel(4);
+        let (quic_connectp, quic_connectc) = mpsc::channel(4);
         let (nbr_msg_rxp, nbr_msg_rxc) = mpsc::channel(4);
         let (nbr_timerp, nbr_timerc) = mpsc::channel(4);
         let (policy_resultp, policy_resultc) = mpsc::unbounded_channel();
@@ -292,6 +303,8 @@ impl ProtocolInstance for Instance {
         let tx = ProtocolInputChannelsTx {
             tcp_accept: tcp_acceptp,
             tcp_connect: tcp_connectp,
+            quic_accept: quic_acceptp,
+            quic_connect: quic_connectp,
             nbr_msg_rx: nbr_msg_rxp,
             nbr_timer: nbr_timerp,
             policy_result: policy_resultp,
@@ -300,6 +313,8 @@ impl ProtocolInstance for Instance {
         let rx = ProtocolInputChannelsRx {
             tcp_accept: tcp_acceptc,
             tcp_connect: tcp_connectc,
+            quic_accept: quic_acceptc,
+            quic_connect: quic_connectc,
             nbr_msg_rx: nbr_msg_rxc,
             nbr_timer: nbr_timerc,
             policy_result: policy_resultc,
@@ -320,24 +335,35 @@ impl ProtocolInstance for Instance {
 impl InstanceState {
     fn new(
         router_id: Ipv4Addr,
+        config: &InstanceCfg,
         instance_tx: &InstanceChannelsTx<Instance>,
     ) -> Result<InstanceState, Error> {
-        let mut listening_sockets = Vec::new();
+        let mut listening_sockets_tcp = Vec::new();
 
         // Create TCP listeners.
         for af in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
-            let socket = network_tcp::listen_socket(af)
-                .map(Arc::new)
-                .map_err(IoError::TcpSocketError)?;
-            let task = tasks::tcp_listener(
-                &socket,
-                &instance_tx.protocol_input.tcp_accept,
-            );
-            listening_sockets.push(TcpListenerTask {
-                af,
-                socket,
-                _task: task,
-            });
+            if config.quic{
+                let socket = network_quic::listen_socket(af)
+                    .map_err(IoError::QuicSocketError)?;
+                let _task = tasks::quic_listener(
+                    socket,
+                    &instance_tx.protocol_input.quic_accept,
+                );
+            } else {
+                let socket = network_tcp::listen_socket(af)
+                    .map(Arc::new)
+                    .map_err(IoError::TcpSocketError)?;
+                let task = tasks::tcp_listener(
+                    &socket,
+                    &instance_tx.protocol_input.tcp_accept,
+                );
+                listening_sockets_tcp.push(TcpListenerTask {
+                    af,
+                    socket,
+                    _task: task,
+                });
+            }
+
         }
 
         // Create routing policy tasks, spawning as many tasks as the number of
@@ -371,7 +397,7 @@ impl InstanceState {
 
         Ok(InstanceState {
             router_id,
-            listening_sockets,
+            listening_sockets: listening_sockets_tcp,
             policy_apply_tasks,
             decision_process_task: None,
             rib: Default::default(),
@@ -411,6 +437,12 @@ impl MessageReceiver<ProtocolInputMsg> for ProtocolInputChannelsRx {
             }
             msg = self.tcp_connect.recv() => {
                 msg.map(ProtocolInputMsg::TcpConnect)
+            }
+            msg = self.quic_accept.recv() => {
+                msg.map(ProtocolInputMsg::QuicAccept)
+            }
+            msg = self.quic_connect.recv() => {
+                msg.map(ProtocolInputMsg::QuicConnect)
             }
             msg = self.nbr_msg_rx.recv() => {
                 msg.map(ProtocolInputMsg::NbrRx)
@@ -511,11 +543,21 @@ fn process_protocol_msg(
         }
         // Accepted QUIC connection request.
         ProtocolInputMsg::QuicAccept(mut msg) => {
-            // TODO
+            events::process_quic_accept(
+                instance, 
+                neighbors, 
+                msg.connection(),
+                msg.conn_info
+            )?;
         }
         // Established QUIC connection.
         ProtocolInputMsg::QuicConnect(mut msg) => {
-            // TODO
+            events::process_quic_connect(
+                instance, 
+                neighbors, 
+                msg.connection(),
+                msg.conn_info
+            )?;
         }
         // Received message from neighbor.
         ProtocolInputMsg::NbrRx(msg) => {

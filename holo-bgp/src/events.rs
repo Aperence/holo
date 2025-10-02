@@ -12,7 +12,7 @@ use holo_utils::bgp::RouteType;
 use holo_utils::ibus::IbusChannelsTx;
 use holo_utils::ip::{IpAddrKind, IpNetworkKind};
 use holo_utils::policy::{PolicyResult, PolicyType};
-use holo_utils::socket::{ConnInfo, TcpStream};
+use holo_utils::socket::{ConnInfo, TcpStream, QuicSocket};
 use ipnetwork::IpNetwork;
 use num_traits::FromPrimitive;
 
@@ -88,6 +88,67 @@ pub(crate) fn process_tcp_connect(
 
     // Invoke FSM event.
     nbr.fsm_event(instance, fsm::Event::Connected(stream, conn_info));
+
+    Ok(())
+}
+
+// ===== QUIC connection request =====
+pub(crate) fn process_quic_accept(
+    instance: &mut InstanceUpView<'_>,
+    neighbors: &mut Neighbors,
+    conn: QuicSocket,
+    conn_info: ConnInfo,
+) -> Result<(), Error> {
+    // Lookup neighbor.
+    let Some(nbr) = neighbors.get_mut(&conn_info.remote_addr) else {
+        return Ok(());
+    };
+
+    // Workaround to prevent connection collision until collision resolution
+    // is implemented.
+    if nbr.conn_info.is_some() {
+        return Ok(());
+    }
+
+    // Initialize the accepted stream. 
+    /* // TODO: is it needed for QUIC ?
+    network_quic::accepted_stream_init(
+        &stream,
+        nbr.remote_addr.address_family(),
+        nbr.tx_ttl(),
+        nbr.config.transport.ttl_security,
+    )
+    .map_err(IoError::TcpSocketError)?;
+    */
+
+    // Invoke FSM event.
+    nbr.fsm_event(instance, fsm::Event::ConnectedQuic(conn, conn_info));
+
+    Ok(())
+}
+
+// ===== QUIC connection established =====
+
+pub(crate) fn process_quic_connect(
+    instance: &mut InstanceUpView<'_>,
+    neighbors: &mut Neighbors,
+    conn: QuicSocket,
+    conn_info: ConnInfo,
+) -> Result<(), Error> {
+    // Lookup neighbor.
+    let Some(nbr) = neighbors.get_mut(&conn_info.remote_addr) else {
+        return Ok(());
+    };
+    nbr.tasks.connect = None;
+
+    // Workaround to prevent connection collision until collision resolution
+    // is implemented.
+    if nbr.conn_info.is_some() {
+        return Ok(());
+    }
+
+    // Invoke FSM event.
+    nbr.fsm_event(instance, fsm::Event::ConnectedQuic(conn, conn_info));
 
     Ok(())
 }

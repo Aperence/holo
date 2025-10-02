@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use holo_protocol::InstanceChannelsTx;
 use holo_utils::bgp::{AfiSafi, RouteType, WellKnownCommunities};
 use holo_utils::ibus::IbusChannelsTx;
-use holo_utils::socket::{TTL_MAX, ConnInfo, TcpStream};
+use holo_utils::socket::{TTL_MAX, ConnInfo, TcpStream, QuicSocket};
 use holo_utils::task::{IntervalTask, Task, TimeoutTask};
 use num_traits::{FromPrimitive, ToPrimitive};
 use tokio::sync::mpsc;
@@ -24,7 +24,7 @@ use tokio::sync::mpsc::{Sender, UnboundedSender};
 use crate::af::{AddressFamily, Ipv4Unicast, Ipv6Unicast};
 use crate::debug::Debug;
 use crate::error::Error;
-use crate::instance::{Instance, InstanceUpView};
+use crate::instance::{Instance, InstanceUpView, ProtocolInputChannelsTx};
 use crate::northbound::configuration::{InstanceCfg, NeighborCfg};
 use crate::northbound::notification;
 use crate::northbound::rpc::ClearType;
@@ -39,7 +39,7 @@ use crate::packet::message::{
 use crate::rib::{Rib, Route, RouteOrigin};
 #[cfg(feature = "testing")]
 use crate::tasks::messages::ProtocolOutputMsg;
-use crate::tasks::messages::input::{NbrTimerMsg, TcpConnectMsg};
+use crate::tasks::messages::input::{NbrTimerMsg};
 use crate::tasks::messages::output::NbrTxMsg;
 use crate::{events, rib, tasks};
 
@@ -104,6 +104,7 @@ pub struct NeighborTasks {
     pub connect: Option<Task<()>>,
     pub connect_retry: Option<TimeoutTask>,
     pub tcp_rx: Option<Task<()>>,
+    pub quic_rx: Option<Task<()>>,
     pub keepalive: Option<IntervalTask>,
     pub holdtime: Option<TimeoutTask>,
 }
@@ -127,7 +128,7 @@ pub type Neighbors = BTreeMap<IpAddr, Neighbor>;
 
 // Finite State Machine.
 pub mod fsm {
-    use holo_utils::socket::{ConnInfo, TcpStream};
+    use holo_utils::socket::{ConnInfo, TcpStream, QuicSocket};
     use serde::{Deserialize, Serialize};
 
     use crate::packet::error::DecodeError;
@@ -157,6 +158,7 @@ pub mod fsm {
         // Tcp_CR_Acked
         // TcpConnectionConfirmed
         Connected(TcpStream, ConnInfo),
+        ConnectedQuic(QuicSocket, ConnInfo),
         // TcpConnectionFails
         ConnFail,
         // BGPHeaderErr
@@ -240,7 +242,7 @@ impl Neighbor {
                     if self.config.transport.passive_mode {
                         Some(fsm::State::Active)
                     } else {
-                        self.connect(&instance.tx.protocol_input.tcp_connect);
+                        self.connect(&instance.tx.protocol_input);
                         Some(fsm::State::Connect)
                     }
                 }
@@ -263,6 +265,16 @@ impl Neighbor {
                     );
                     Some(fsm::State::OpenSent)
                 }
+                fsm::Event::ConnectedQuic(conn, conn_info) => {
+                    self.connect_retry_stop();
+                    self.connection_setup_quic(conn, conn_info, instance);
+                    self.open_send(instance.config, instance.state.router_id);
+                    self.holdtime_start(
+                        LARGE_HOLDTIME,
+                        &instance.tx.protocol_input.nbr_timer,
+                    );
+                    Some(fsm::State::OpenSent)
+                }
                 fsm::Event::ConnFail => {
                     self.session_close(rib, instance.tx, None);
                     Some(fsm::State::Idle)
@@ -273,7 +285,7 @@ impl Neighbor {
                     Some(fsm::State::Idle)
                 }
                 fsm::Event::Timer(fsm::Timer::ConnectRetry) => {
-                    self.connect(&instance.tx.protocol_input.tcp_connect);
+                    self.connect(&instance.tx.protocol_input);
                     self.connect_retry_start(
                         &instance.tx.protocol_input.nbr_timer,
                     );
@@ -302,6 +314,16 @@ impl Neighbor {
                     );
                     Some(fsm::State::OpenSent)
                 }
+                fsm::Event::ConnectedQuic(conn, conn_info) => {
+                    self.connect_retry_stop();
+                    self.connection_setup_quic(conn, conn_info, instance);
+                    self.open_send(instance.config, instance.state.router_id);
+                    self.holdtime_start(
+                        LARGE_HOLDTIME,
+                        &instance.tx.protocol_input.nbr_timer,
+                    );
+                    Some(fsm::State::OpenSent)
+                }
                 fsm::Event::ConnFail => {
                     self.session_close(rib, instance.tx, None);
                     Some(fsm::State::Idle)
@@ -312,7 +334,7 @@ impl Neighbor {
                     Some(fsm::State::Idle)
                 }
                 fsm::Event::Timer(fsm::Timer::ConnectRetry) => {
-                    self.connect(&instance.tx.protocol_input.tcp_connect);
+                    self.connect(&instance.tx.protocol_input);
                     self.connect_retry_start(
                         &instance.tx.protocol_input.nbr_timer,
                     );
@@ -553,6 +575,56 @@ impl Neighbor {
             &instance.tx.protocol_input.nbr_msg_rx,
         );
         self.tasks.tcp_rx = Some(tcp_rx_task);
+
+        // No need to keep track of the Tx task since it gracefully exits as
+        // soon as the tx end of its mpsc channel is dropped. This ensures that
+        // messages sent during neighbor shutdown will be delivered.
+        tx_task.detach();
+    }
+
+    // Sets up the connection for the BGP neighbor, spawning necessary tasks for
+    // QUIC communication.
+    fn connection_setup_quic(
+        &mut self,
+        conn: QuicSocket,
+        conn_info: ConnInfo,
+        instance: &mut InstanceUpView<'_>,
+    ) {
+        // Store TCP connection information.
+        self.conn_info = Some(conn_info);
+
+        // Split TCP stream into two halves.
+        let (read_half, write_half) = conn.split();
+
+        // Spawn neighbor QUIC Tx task.
+        let (msg_txp, msg_txc) = mpsc::unbounded_channel();
+        let cxt = EncodeCxt {
+            capabilities: Default::default(),
+        };
+        let mut tx_task = tasks::quic_nbr_tx(
+            self,
+            cxt,
+            write_half,
+            msg_txc,
+            #[cfg(feature = "testing")]
+            &instance.tx.protocol_output,
+        );
+        self.msg_txp = Some(msg_txp);
+
+        // Spawn neighbor TCP Rx task.
+        let cxt = DecodeCxt {
+            peer_type: self.peer_type,
+            peer_as: self.config.peer_as,
+            reject_as_sets: instance.config.reject_as_sets,
+            capabilities: Default::default(),
+        };
+        let quic_rx_task = tasks::quic_nbr_rx(
+            self,
+            cxt,
+            read_half,
+            &instance.tx.protocol_input.nbr_msg_rx,
+        );
+        self.tasks.quic_rx = Some(quic_rx_task);
 
         // No need to keep track of the Tx task since it gracefully exits as
         // soon as the tx end of its mpsc channel is dropped. This ensures that
@@ -841,9 +913,13 @@ impl Neighbor {
         self.tasks.autostart = None;
     }
 
-    // Starts a TCP connection task to the neighbor's remote address.
-    fn connect(&mut self, tcp_connectp: &Sender<TcpConnectMsg>) {
-        let task = tasks::tcp_connect(self, tcp_connectp);
+    // Starts a TCP/QUIC connection task to the neighbor's remote address.
+    fn connect(&mut self, proto_input: &ProtocolInputChannelsTx) {
+        let task = if self.config.transport.quic{
+            tasks::tcp_connect(self, &proto_input.tcp_connect)
+        } else {
+            tasks::quic_connect(self, &proto_input.quic_connect)
+        };
         self.tasks.connect = Some(task);
     }
 
