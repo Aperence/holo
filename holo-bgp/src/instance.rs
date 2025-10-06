@@ -6,6 +6,8 @@
 
 use std::net::Ipv4Addr;
 use std::sync::Arc;
+use std::thread::sleep;
+use std::time::Duration;
 
 use holo_protocol::{
     InstanceChannelsTx, InstanceShared, MessageReceiver, ProtocolInstance,
@@ -21,7 +23,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::{Receiver, Sender, UnboundedReceiver, UnboundedSender};
 
 use crate::af::{Ipv4Unicast, Ipv6Unicast};
-use crate::debug::{Debug, InstanceInactiveReason};
+use crate::debug::{Debug, InstanceInactiveReason, TransportType};
 use crate::error::{Error, IoError};
 use crate::neighbor::{Neighbors, fsm};
 use crate::northbound::configuration::InstanceCfg;
@@ -65,7 +67,9 @@ pub struct InstanceState {
     // Instance Router ID.
     pub router_id: Ipv4Addr,
     // TCP listening sockets.
-    pub listening_sockets: Vec<TcpListenerTask>,
+    pub listening_sockets_tcp: Vec<TcpListenerTask>,
+    // QUIC listening sockets.
+    pub listening_sockets_quic: Vec<QuicListenerTask>,
     // Policy tasks.
     pub policy_apply_tasks: PolicyApplyTasks,
     // Timeout to trigger the decision process.
@@ -78,6 +82,12 @@ pub struct InstanceState {
 pub struct TcpListenerTask {
     pub af: AddressFamily,
     pub socket: Arc<TcpListener>,
+    _task: Task<()>,
+}
+
+#[derive(Debug)]
+pub struct QuicListenerTask {
+    pub af: AddressFamily,
     _task: Task<()>,
 }
 
@@ -234,6 +244,17 @@ impl Instance {
             None
         }
     }
+
+    pub(crate) fn restart(&mut self){
+        if let Some(state) = &self.state{
+            let router_id = state.router_id;
+
+            self.stop(InstanceInactiveReason::AdminDown);
+            sleep(Duration::from_secs(5)); // TODO: find a clean way to wait for ports to be freed
+            self.start(router_id);
+        }
+
+    }
 }
 
 impl ProtocolInstance for Instance {
@@ -339,16 +360,22 @@ impl InstanceState {
         instance_tx: &InstanceChannelsTx<Instance>,
     ) -> Result<InstanceState, Error> {
         let mut listening_sockets_tcp = Vec::new();
+        let mut listening_sockets_quic = Vec::new();
 
         // Create TCP listeners.
         for af in [AddressFamily::Ipv4, AddressFamily::Ipv6] {
-            if config.quic{
-                let socket = network_quic::listen_socket(af)
+            if config.quic.enabled{
+                let socket = network_quic::listen_socket(af, &config.quic.cert, &config.quic.private_key)
                     .map_err(IoError::QuicSocketError)?;
-                let _task = tasks::quic_listener(
+                let task = tasks::quic_listener(
                     socket,
                     &instance_tx.protocol_input.quic_accept,
                 );
+                listening_sockets_quic.push(QuicListenerTask {
+                    af,
+                    _task: task
+                });
+                Debug::CreatedTransport(TransportType::QUIC, af).log();
             } else {
                 let socket = network_tcp::listen_socket(af)
                     .map(Arc::new)
@@ -362,6 +389,7 @@ impl InstanceState {
                     socket,
                     _task: task,
                 });
+                Debug::CreatedTransport(TransportType::TCP, af).log();
             }
 
         }
@@ -397,7 +425,8 @@ impl InstanceState {
 
         Ok(InstanceState {
             router_id,
-            listening_sockets: listening_sockets_tcp,
+            listening_sockets_tcp,
+            listening_sockets_quic,
             policy_apply_tasks,
             decision_process_task: None,
             rib: Default::default(),

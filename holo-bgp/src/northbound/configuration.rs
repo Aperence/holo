@@ -57,6 +57,7 @@ pub enum Event {
     RedistributeIbusSub(Protocol, AddressFamily),
     RedistributeDelete(Protocol, AddressFamily, AfiSafi),
     UpdateTraceOptions,
+    Restart
 }
 
 pub static VALIDATION_CALLBACKS: Lazy<ValidationCallbacks> =
@@ -76,7 +77,7 @@ pub struct InstanceCfg {
     pub afi_safi: BTreeMap<AfiSafi, InstanceAfiSafiCfg>,
     pub reject_as_sets: bool,
     pub trace_opts: InstanceTraceOptions,
-    pub quic: bool
+    pub quic: QuicCfg
 }
 
 #[derive(Debug)]
@@ -163,7 +164,13 @@ pub struct NeighborTransportCfg {
     pub ttl_security: Option<u8>,
     pub secure_session_enabled: bool,
     pub md5_key: Option<String>,
-    pub quic: bool
+    pub quic: NeighborQuicCfg
+}
+
+#[derive(Debug)]
+pub struct NeighborQuicCfg{
+    pub enable: bool,
+    pub verify_peer: bool
 }
 
 #[derive(Debug)]
@@ -249,6 +256,13 @@ pub struct TraceOptionPacketResolved {
 pub struct TraceOptionPacketType {
     pub tx: bool,
     pub rx: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct QuicCfg {
+    pub enabled: bool,
+    pub cert: String,
+    pub private_key: String
 }
 
 // ===== callbacks =====
@@ -687,6 +701,43 @@ fn load_callbacks() -> Callbacks<Instance> {
         .modify_apply(|instance, args| {
             let reject = args.dnode.get_bool();
             instance.config.reject_as_sets = reject;
+        })
+        .path(bgp::global::quic::enable::PATH)
+        .modify_apply(|instance, args| {
+            let enabled = args.dnode.get_bool();
+
+            instance.config.quic.enabled = enabled;
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::Restart);
+        })
+        .path(bgp::global::quic::cert::PATH)
+        .modify_apply(|instance, args| {
+            let cert = args.dnode.get_string();
+            instance.config.quic.cert = cert;
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::Restart);
+        })
+        .delete_apply(|instance, args| {
+            instance.config.quic.cert = "".to_string(); // TODO: reset quic flag
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::Restart);
+        })
+        .path(bgp::global::quic::private_key::PATH)
+        .modify_apply(|instance, args| {
+            let private_key = args.dnode.get_string();
+            instance.config.quic.private_key = private_key;
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::Restart);
+        })
+        .delete_apply(|instance, args| {
+            instance.config.quic.cert = "".to_string(); // TODO: reset quic flag
+
+            let event_queue = args.event_queue;
+            event_queue.insert(Event::Restart);
         })
         .path(bgp::global::trace_options::flag::PATH)
         .create_apply(|instance, args| {
@@ -1540,6 +1591,22 @@ fn load_callbacks() -> Callbacks<Instance> {
             let event_queue = args.event_queue;
             event_queue.insert(Event::UpdateTraceOptions);
         })
+        .path(bgp::neighbors::neighbor::transport::quic::enable::PATH)
+        .modify_apply(|instance, args| {
+            let nbr_addr = args.list_entry.into_neighbor().unwrap();
+            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
+
+            let enable = args.dnode.get_bool();
+            nbr.config.transport.quic.enable = enable;
+        })
+        .path(bgp::neighbors::neighbor::transport::quic::verify_peer::PATH)
+        .modify_apply(|instance, args| {
+            let nbr_addr = args.list_entry.into_neighbor().unwrap();
+            let nbr = instance.neighbors.get_mut(&nbr_addr).unwrap();
+
+            let verify_peer = args.dnode.get_bool();
+            nbr.config.transport.quic.verify_peer = verify_peer;
+        })
         .build()
 }
 
@@ -1566,164 +1633,167 @@ impl Provider for Instance {
         match event {
             Event::InstanceUpdate => self.update(),
             Event::NeighborUpdate(nbr_addr) => {
-                let Some((mut instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+                        let Some((mut instance, neighbors)) = self.as_up() else {
+                            return;
+                        };
+                        let nbr = neighbors.get_mut(&nbr_addr).unwrap();
 
-                if nbr.config.enabled {
-                    nbr.fsm_event(&mut instance, fsm::Event::Start);
-                } else {
-                    let error_code = ErrorCode::Cease;
-                    let error_subcode = CeaseSubcode::AdministrativeShutdown;
-                    let msg = NotificationMsg::new(error_code, error_subcode);
-                    nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
-                }
-            }
+                        if nbr.config.enabled {
+                            nbr.fsm_event(&mut instance, fsm::Event::Start);
+                        } else {
+                            let error_code = ErrorCode::Cease;
+                            let error_subcode = CeaseSubcode::AdministrativeShutdown;
+                            let msg = NotificationMsg::new(error_code, error_subcode);
+                            nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
+                        }
+                    }
             Event::NeighborDelete(nbr_addr) => {
-                let Some((mut instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+                        let Some((mut instance, neighbors)) = self.as_up() else {
+                            return;
+                        };
+                        let nbr = neighbors.get_mut(&nbr_addr).unwrap();
 
-                // Unset neighbor's password in the listening sockets.
-                for listener in
-                    instance.state.listening_sockets.iter().filter(|listener| {
-                        listener.af == nbr_addr.address_family()
-                    })
-                {
-                    network_tcp::listen_socket_md5sig_update(
-                        &listener.socket,
-                        &nbr_addr,
-                        None,
-                    );
-                }
-
-                // Delete neighbor.
-                let error_code = ErrorCode::Cease;
-                let error_subcode = CeaseSubcode::PeerDeConfigured;
-                let msg = NotificationMsg::new(error_code, error_subcode);
-                nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
-                neighbors.remove(&nbr_addr);
-            }
-            Event::NeighborReset(nbr_addr, msg) => {
-                let Some((mut instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
-
-                nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
-            }
-            Event::NeighborUpdateAuth(nbr_addr) => {
-                let Some((instance, neighbors)) = self.as_up() else {
-                    return;
-                };
-                let nbr = neighbors.get_mut(&nbr_addr).unwrap();
-
-                // Get neighbor password.
-                let key = if nbr.config.transport.secure_session_enabled
-                    && let Some(key) = &nbr.config.transport.md5_key
-                {
-                    Some(key.clone())
-                } else {
-                    None
-                };
-
-                // Set/unset password in the listening sockets.
-                for listener in
-                    instance.state.listening_sockets.iter().filter(|listener| {
-                        listener.af == nbr_addr.address_family()
-                    })
-                {
-                    network_tcp::listen_socket_md5sig_update(
-                        &listener.socket,
-                        &nbr_addr,
-                        key.as_deref(),
-                    );
-                }
-            }
-            Event::RedistributeIbusSub(protocol, af) => {
-                self.tx.ibus.route_redistribute_sub(protocol, Some(af));
-            }
-            Event::RedistributeDelete(protocol, af, afi_safi) => {
-                self.tx.ibus.route_redistribute_unsub(protocol, Some(af));
-
-                if let Some((mut instance, _)) = self.as_up() {
-                    match afi_safi {
-                        AfiSafi::Ipv4Unicast => {
-                            redistribute_delete::<Ipv4Unicast>(
-                                &mut instance,
-                                protocol,
+                        // Unset neighbor's password in the listening sockets.
+                        for listener in
+                            instance.state.listening_sockets_tcp.iter().filter(|listener| {
+                                listener.af == nbr_addr.address_family()
+                            })
+                        {
+                            network_tcp::listen_socket_md5sig_update(
+                                &listener.socket,
+                                &nbr_addr,
+                                None,
                             );
                         }
-                        AfiSafi::Ipv6Unicast => {
-                            redistribute_delete::<Ipv6Unicast>(
-                                &mut instance,
-                                protocol,
+
+                        // Delete neighbor.
+                        let error_code = ErrorCode::Cease;
+                        let error_subcode = CeaseSubcode::PeerDeConfigured;
+                        let msg = NotificationMsg::new(error_code, error_subcode);
+                        nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
+                        neighbors.remove(&nbr_addr);
+                    }
+            Event::NeighborReset(nbr_addr, msg) => {
+                        let Some((mut instance, neighbors)) = self.as_up() else {
+                            return;
+                        };
+                        let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+
+                        nbr.fsm_event(&mut instance, fsm::Event::Stop(Some(msg)));
+                    }
+            Event::NeighborUpdateAuth(nbr_addr) => {
+                        let Some((instance, neighbors)) = self.as_up() else {
+                            return;
+                        };
+                        let nbr = neighbors.get_mut(&nbr_addr).unwrap();
+
+                        // Get neighbor password.
+                        let key = if nbr.config.transport.secure_session_enabled
+                            && let Some(key) = &nbr.config.transport.md5_key
+                        {
+                            Some(key.clone())
+                        } else {
+                            None
+                        };
+
+                        // Set/unset password in the listening sockets.
+                        for listener in
+                            instance.state.listening_sockets_tcp.iter().filter(|listener| {
+                                listener.af == nbr_addr.address_family()
+                            })
+                        {
+                            network_tcp::listen_socket_md5sig_update(
+                                &listener.socket,
+                                &nbr_addr,
+                                key.as_deref(),
                             );
                         }
                     }
-                }
-            }
+            Event::RedistributeIbusSub(protocol, af) => {
+                        self.tx.ibus.route_redistribute_sub(protocol, Some(af));
+                    }
+            Event::RedistributeDelete(protocol, af, afi_safi) => {
+                        self.tx.ibus.route_redistribute_unsub(protocol, Some(af));
+
+                        if let Some((mut instance, _)) = self.as_up() {
+                            match afi_safi {
+                                AfiSafi::Ipv4Unicast => {
+                                    redistribute_delete::<Ipv4Unicast>(
+                                        &mut instance,
+                                        protocol,
+                                    );
+                                }
+                                AfiSafi::Ipv6Unicast => {
+                                    redistribute_delete::<Ipv6Unicast>(
+                                        &mut instance,
+                                        protocol,
+                                    );
+                                }
+                            }
+                        }
+                    }
             Event::UpdateTraceOptions => {
-                for nbr in self.neighbors.values_mut() {
-                    let nbr_trace_opts = &nbr.config.trace_opts;
-                    let instance_trace_opts = &self.config.trace_opts;
+                        for nbr in self.neighbors.values_mut() {
+                            let nbr_trace_opts = &nbr.config.trace_opts;
+                            let instance_trace_opts = &self.config.trace_opts;
 
-                    let disabled = TraceOptionPacketType {
-                        tx: false,
-                        rx: false,
-                    };
-                    let open = nbr_trace_opts
-                        .packets
-                        .open
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.open)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let update = nbr_trace_opts
-                        .packets
-                        .update
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.update)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let notification = nbr_trace_opts
-                        .packets
-                        .notification
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.notification)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let keepalive = nbr_trace_opts
-                        .packets
-                        .keepalive
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.keepalive)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
-                    let refresh = nbr_trace_opts
-                        .packets
-                        .refresh
-                        .or(nbr_trace_opts.packets.all)
-                        .or(instance_trace_opts.packets.refresh)
-                        .or(instance_trace_opts.packets.all)
-                        .unwrap_or(disabled);
+                            let disabled = TraceOptionPacketType {
+                                tx: false,
+                                rx: false,
+                            };
+                            let open = nbr_trace_opts
+                                .packets
+                                .open
+                                .or(nbr_trace_opts.packets.all)
+                                .or(instance_trace_opts.packets.open)
+                                .or(instance_trace_opts.packets.all)
+                                .unwrap_or(disabled);
+                            let update = nbr_trace_opts
+                                .packets
+                                .update
+                                .or(nbr_trace_opts.packets.all)
+                                .or(instance_trace_opts.packets.update)
+                                .or(instance_trace_opts.packets.all)
+                                .unwrap_or(disabled);
+                            let notification = nbr_trace_opts
+                                .packets
+                                .notification
+                                .or(nbr_trace_opts.packets.all)
+                                .or(instance_trace_opts.packets.notification)
+                                .or(instance_trace_opts.packets.all)
+                                .unwrap_or(disabled);
+                            let keepalive = nbr_trace_opts
+                                .packets
+                                .keepalive
+                                .or(nbr_trace_opts.packets.all)
+                                .or(instance_trace_opts.packets.keepalive)
+                                .or(instance_trace_opts.packets.all)
+                                .unwrap_or(disabled);
+                            let refresh = nbr_trace_opts
+                                .packets
+                                .refresh
+                                .or(nbr_trace_opts.packets.all)
+                                .or(instance_trace_opts.packets.refresh)
+                                .or(instance_trace_opts.packets.all)
+                                .unwrap_or(disabled);
 
-                    nbr.config.trace_opts.events_resolved = nbr_trace_opts
-                        .events
-                        .unwrap_or(instance_trace_opts.events);
-                    nbr.config.trace_opts.packets_resolved.store(Arc::new(
-                        TraceOptionPacketResolved {
-                            open,
-                            update,
-                            notification,
-                            keepalive,
-                            refresh,
-                        },
-                    ));
-                }
-            }
+                            nbr.config.trace_opts.events_resolved = nbr_trace_opts
+                                .events
+                                .unwrap_or(instance_trace_opts.events);
+                            nbr.config.trace_opts.packets_resolved.store(Arc::new(
+                                TraceOptionPacketResolved {
+                                    open,
+                                    update,
+                                    notification,
+                                    keepalive,
+                                    refresh,
+                                },
+                            ));
+                        }
+                    }
+            Event::Restart => {
+                self.restart();
+            },
         }
     }
 }
@@ -1794,7 +1864,7 @@ impl Default for InstanceCfg {
             afi_safi: Default::default(),
             reject_as_sets,
             trace_opts: Default::default(),
-            quic: false
+            quic: Default::default()
         }
     }
 }
@@ -1899,7 +1969,10 @@ impl Default for NeighborTransportCfg {
             ttl_security: None,
             secure_session_enabled,
             md5_key: None,
-            quic: false
+            quic: NeighborQuicCfg { 
+                enable: false, 
+                verify_peer: true 
+            }
         }
     }
 }
@@ -1976,5 +2049,15 @@ impl Default for TraceOptionPacketType {
         let rx = bgp::global::trace_options::flag::receive::DFLT;
 
         TraceOptionPacketType { tx, rx }
+    }
+}
+
+impl Default for QuicCfg{
+    fn default() -> Self {
+        Self { 
+            enabled: false, 
+            cert: "".to_string(), 
+            private_key: "".to_string() 
+        }
     }
 }

@@ -221,4 +221,49 @@ module holo-bgp {
       }
     }
   }
+
+  augment "/rt:routing/rt:control-plane-protocols/"
+        + "rt:control-plane-protocol/bgp:bgp/bgp:global" {
+    container quic {
+      description
+        "BGP over QUIC configuration";
+      leaf enable {
+        type boolean;
+        default "false";
+        description
+          "Use QUIC as transport protocol";
+      }
+      leaf cert {
+        type string;
+        description
+          "Certificate to use with QUIC";
+      }
+      leaf private_key {
+        type string;
+        description
+          "Private key to use with QUIC";
+      }
+    }
+  }
+
+  augment "/rt:routing/rt:control-plane-protocols/"
+        + "rt:control-plane-protocol/bgp:bgp/bgp:neighbors/bgp:neighbor/"
+        + "bgp:transport" {
+    container quic {
+      description
+        "BGP over QUIC neighbor configuration";
+      leaf enable {
+        type boolean;
+        default "false";
+        description
+          "Use QUIC as transport protocol";
+      }
+      leaf verify-peer {
+        type boolean;
+        default "true";
+        description
+          "Verify the certificate of the peer";
+      }
+    }
+  }
 }

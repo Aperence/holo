@@ -17,6 +17,7 @@ use tracing::{Instrument, debug_span, error};
 use crate::debug::Debug;
 use crate::error::NbrRxError;
 use crate::neighbor::{Neighbor, fsm};
+use crate::northbound::configuration::NeighborQuicCfg;
 use crate::packet::message::{DecodeCxt, EncodeCxt, KeepaliveMsg, Message};
 use crate::{network_tcp, network_quic, policy};
 
@@ -459,6 +460,7 @@ pub(crate) fn quic_listener(
 // QUIC connect task.
 pub(crate) fn quic_connect(
     nbr: &Neighbor,
+    config: &NeighborQuicCfg,
     quic_connectp: &Sender<messages::input::QuicConnectMsg>,
 ) -> Task<()> {
     #[cfg(not(feature = "testing"))]
@@ -470,6 +472,7 @@ pub(crate) fn quic_connect(
         let local_addr = nbr.config.transport.local_addr;
         let ttl = nbr.tx_ttl();
         let ttl_security = nbr.config.transport.ttl_security;
+        let verify_peer = config.verify_peer;
         let quic_connectp = quic_connectp.clone();
         Task::spawn(
             async move {
@@ -478,7 +481,8 @@ pub(crate) fn quic_connect(
                         remote_addr,
                         local_addr,
                         ttl,
-                        ttl_security
+                        ttl_security,
+                        verify_peer
                     )
                     .await;
 

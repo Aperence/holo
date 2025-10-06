@@ -32,6 +32,8 @@ const BGP_PORT: u16 = 179;
 
 pub(crate) fn listen_socket(
     af: AddressFamily,
+    cert: &str,
+    private_key: &str
 ) -> Result<QuicConnectionStream<DefaultMetrics>, std::io::Error> {
     #[cfg(not(feature = "testing"))]
     {
@@ -63,8 +65,8 @@ pub(crate) fn listen_socket(
             ConnectionParams::new_server(
                 QuicSettings::default(), 
                 TlsCertificatePaths{
-                    cert: "./cert.crt", 
-                    private_key: "./cert.key",
+                    cert, 
+                    private_key,
                     kind: CertificateKind::X509
                 }, 
                 Hooks::default()
@@ -94,34 +96,41 @@ pub(crate) async fn listen_loop(
     mut listener: QuicConnectionStream<DefaultMetrics>,
     quic_acceptp: Sender<QuicAcceptMsg>,
 ) -> Result<(), SendError<QuicAcceptMsg>> {
-    while let Some(accepted) = listener.next().await {
-        match accepted {
-            Ok(conn) => {
-                match QuicSocket::accept(conn).await{
-                    Ok(socket) => {
-                        match socket.conn_info() {
-                            Ok(conn_info) => {
-                                let msg = QuicAcceptMsg {
-                                    conn: Some(socket),
-                                    conn_info,
-                                };
-                                quic_acceptp.send(msg).await?;
+    loop {
+        match listener.next().await{
+            Some(accepted) => match accepted {
+                Ok(conn) => {
+                    match QuicSocket::accept(conn).await{
+                        Ok(socket) => {
+                            match socket.conn_info() {
+                                Ok(conn_info) => {
+                                    let msg = QuicAcceptMsg {
+                                        conn: Some(socket),
+                                        conn_info,
+                                    };
+                                    quic_acceptp.send(msg).await?;
+                                }
+                                Err(error) => {
+                                    IoError::QuicInfoError(error).log();
+                                }
                             }
-                            Err(error) => {
-                                IoError::QuicInfoError(error).log();
-                            }
+                        },
+                        Err(err) => {
+                            IoError::QuicAcceptError(err).log();
                         }
-                    },
-                    Err(err) => {
-                        IoError::QuicAcceptError(err).log();
                     }
+                },
+                Err(error) => {
+                    IoError::QuicAcceptError(error).log();
                 }
             },
-            Err(error) => {
-                IoError::QuicAcceptError(error).log();
+            None => {
+                IoError::QuicAcceptError(io::Error::new(io::ErrorKind::Other, "Failed getting next listener")).log();
+                break;
             }
         }
     }
+
     Ok(())
 }
 
@@ -166,6 +175,7 @@ pub(crate) async fn connect(
     local_addr: Option<IpAddr>,
     ttl: u8,
     ttl_security: Option<u8>,
+    verify_peer: bool
 ) -> Result<QuicSocket, Error> {
     let af = remote_addr.address_family();
 
@@ -211,7 +221,7 @@ pub(crate) async fn connect(
         .map_err(IoError::QuicConnectError)?;
 
     let mut params = ConnectionParams::default();
-    params.settings.verify_peer = false;
+    params.settings.verify_peer = verify_peer;
 
     let socket = QuicSocket::connect(socket, params).await.map_err(IoError::QuicSocketError)?;
 

@@ -61,7 +61,7 @@ pub(crate) fn process_tcp_accept(
     .map_err(IoError::TcpSocketError)?;
 
     // Invoke FSM event.
-    nbr.fsm_event(instance, fsm::Event::Connected(stream, conn_info));
+    nbr.fsm_event(instance, fsm::Event::Connected(fsm::Connection::TCP(stream), conn_info));
 
     Ok(())
 }
@@ -87,7 +87,7 @@ pub(crate) fn process_tcp_connect(
     }
 
     // Invoke FSM event.
-    nbr.fsm_event(instance, fsm::Event::Connected(stream, conn_info));
+    nbr.fsm_event(instance, fsm::Event::Connected(fsm::Connection::TCP(stream), conn_info));
 
     Ok(())
 }
@@ -122,7 +122,7 @@ pub(crate) fn process_quic_accept(
     */
 
     // Invoke FSM event.
-    nbr.fsm_event(instance, fsm::Event::ConnectedQuic(conn, conn_info));
+    nbr.fsm_event(instance, fsm::Event::Connected(fsm::Connection::QUIC(conn), conn_info));
 
     Ok(())
 }
@@ -148,7 +148,7 @@ pub(crate) fn process_quic_connect(
     }
 
     // Invoke FSM event.
-    nbr.fsm_event(instance, fsm::Event::ConnectedQuic(conn, conn_info));
+    nbr.fsm_event(instance, fsm::Event::Connected(fsm::Connection::QUIC(conn), conn_info));
 
     Ok(())
 }

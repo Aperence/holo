@@ -134,6 +134,12 @@ pub mod fsm {
     use crate::packet::error::DecodeError;
     use crate::packet::message::{NotificationMsg, OpenMsg};
 
+    #[derive(Debug)]
+    pub enum Connection{
+        TCP(TcpStream),
+        QUIC(QuicSocket)
+    }
+
     // FSM states.
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     pub enum State {
@@ -157,8 +163,7 @@ pub mod fsm {
         Stop(Option<NotificationMsg>),
         // Tcp_CR_Acked
         // TcpConnectionConfirmed
-        Connected(TcpStream, ConnInfo),
-        ConnectedQuic(QuicSocket, ConnInfo),
+        Connected(Connection, ConnInfo),
         // TcpConnectionFails
         ConnFail,
         // BGPHeaderErr
@@ -255,19 +260,12 @@ impl Neighbor {
                     self.session_close(rib, instance.tx, None);
                     Some(fsm::State::Idle)
                 }
-                fsm::Event::Connected(stream, conn_info) => {
+                fsm::Event::Connected(conn, conn_info) => {
                     self.connect_retry_stop();
-                    self.connection_setup(stream, conn_info, instance);
-                    self.open_send(instance.config, instance.state.router_id);
-                    self.holdtime_start(
-                        LARGE_HOLDTIME,
-                        &instance.tx.protocol_input.nbr_timer,
-                    );
-                    Some(fsm::State::OpenSent)
-                }
-                fsm::Event::ConnectedQuic(conn, conn_info) => {
-                    self.connect_retry_stop();
-                    self.connection_setup_quic(conn, conn_info, instance);
+                    match conn{
+                        fsm::Connection::TCP(tcp_stream) => self.connection_setup(tcp_stream, conn_info, instance),
+                        fsm::Connection::QUIC(quic_socket) => self.connection_setup_quic(quic_socket, conn_info, instance),
+                    }
                     self.open_send(instance.config, instance.state.router_id);
                     self.holdtime_start(
                         LARGE_HOLDTIME,
@@ -304,19 +302,12 @@ impl Neighbor {
                     self.session_close(rib, instance.tx, None);
                     Some(fsm::State::Idle)
                 }
-                fsm::Event::Connected(stream, conn_info) => {
+                fsm::Event::Connected(conn, conn_info) => {
                     self.connect_retry_stop();
-                    self.connection_setup(stream, conn_info, instance);
-                    self.open_send(instance.config, instance.state.router_id);
-                    self.holdtime_start(
-                        LARGE_HOLDTIME,
-                        &instance.tx.protocol_input.nbr_timer,
-                    );
-                    Some(fsm::State::OpenSent)
-                }
-                fsm::Event::ConnectedQuic(conn, conn_info) => {
-                    self.connect_retry_stop();
-                    self.connection_setup_quic(conn, conn_info, instance);
+                    match conn{
+                        fsm::Connection::TCP(tcp_stream) => self.connection_setup(tcp_stream, conn_info, instance),
+                        fsm::Connection::QUIC(quic_socket) => self.connection_setup_quic(quic_socket, conn_info, instance),
+                    }
                     self.open_send(instance.config, instance.state.router_id);
                     self.holdtime_start(
                         LARGE_HOLDTIME,
@@ -915,10 +906,10 @@ impl Neighbor {
 
     // Starts a TCP/QUIC connection task to the neighbor's remote address.
     fn connect(&mut self, proto_input: &ProtocolInputChannelsTx) {
-        let task = if self.config.transport.quic{
-            tasks::tcp_connect(self, &proto_input.tcp_connect)
+        let task = if self.config.transport.quic.enable{
+            tasks::quic_connect(self, &self.config.transport.quic, &proto_input.quic_connect)
         } else {
-            tasks::quic_connect(self, &proto_input.quic_connect)
+            tasks::tcp_connect(self, &proto_input.tcp_connect)
         };
         self.tasks.connect = Some(task);
     }

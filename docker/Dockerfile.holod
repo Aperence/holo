@@ -5,6 +5,7 @@ FROM rust:trixie AS build
 
 RUN apt-get update && \
     apt-get install -y build-essential \
+    clang \
     cmake \
     libpcre2-dev \
     protobuf-compiler

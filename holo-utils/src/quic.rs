@@ -8,15 +8,25 @@ type Data = Vec<u8>;
 enum Command{
     Connected,
     OpenStreams,
-    NewStreamRead(u64),
-    NewStreamWrite(u64),
+    NewStreamRead{
+        id: u64
+    },
+    NewStreamWrite{
+        id: u64
+    },
 }
 
 enum CommandResult{
     Connected,
     OpenStreams(HashSet<u64>),
-    NewStreamRead(u64, Receiver<Data>),
-    NewStreamWrite(u64, Sender<Data>),
+    NewStreamRead{
+        id: u64, 
+        recv: Receiver<Data>
+    },
+    NewStreamWrite{
+        id: u64, 
+        send: Sender<Data>
+    },
     StreamAlreadyCreated,
     StreamAlreadyClosed
 }
@@ -44,13 +54,13 @@ pub struct QuicSocketRead{
 impl QuicSocketRead{
     pub async fn read_stream(&mut self, stream: u64) -> Result<Data, QuicError>{
         if !self.streams.contains_key(&stream){
-            self.send.send(Command::NewStreamRead(stream))
+            self.send.send(Command::NewStreamRead{ id: stream })
                 .await.map_err(|_| 
                     QuicError::ConnClosed
                 )?;
 
             match self.recv.recv().await{
-                Some(CommandResult::NewStreamRead(stream, stream_handle)) => self.streams.insert(stream, stream_handle),
+                Some(CommandResult::NewStreamRead{ id: stream, recv: stream_handle }) => self.streams.insert(stream, stream_handle),
                 Some(_) => todo!("Should handle this impossible case"),
                 None => return Err(QuicError::ConnClosed),
             };
@@ -88,11 +98,11 @@ pub struct QuicSocketWrite{
 impl QuicSocketWrite{
     pub async fn write_stream(&mut self, data: &[u8], stream: u64) -> Result<(), QuicError>{
         if !self.streams.contains_key(&stream){
-            self.send.send(Command::NewStreamWrite(stream))
+            self.send.send(Command::NewStreamWrite{ id: stream })
                 .await.map_err(|_| QuicError::ConnClosed)?;
 
             match self.recv.recv().await{
-                Some(CommandResult::NewStreamWrite(stream, stream_handle)) => self.streams.insert(stream, stream_handle),
+                Some(CommandResult::NewStreamWrite{ id: stream, send: stream_handle }) => self.streams.insert(stream, stream_handle),
                 // TODO: handle StreamAlreadyCreated/Closed
                 Some(_) => todo!("Should handle this impossible case"),
                 None => return Err(QuicError::ConnClosed),
@@ -173,7 +183,7 @@ impl QuicSocket{
 
         let _ = conn.start(driver);
 
-        controller.wait_connected().await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Failed to connect"))?;
+        controller.wait_connected().await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Failed to accept connection"))?;
 
         Ok(controller)
     }
@@ -239,37 +249,37 @@ pub struct QuicDriver{
 impl QuicDriver{
     async fn process_msg(&mut self, msg: Option<Command>, qconn: &mut QuicheConnection) -> QuicResult<()>{
         match msg {
-            Some(Command::NewStreamRead(stream)) => {
+            Some(Command::NewStreamRead{ id }) => {
                 let (tx, rx) = mpsc::channel(self.channel_buf);
-                let entry = self.streams_read.entry(stream).or_insert(StreamState::NotCreated);
+                let entry = self.streams_read.entry(id).or_insert(StreamState::NotCreated);
 
                 let response = match entry{
                     StreamState::NotCreated => {
                         // channel doesn't exist, create it
-                        self.streams_read.insert(stream, StreamState::Channel(tx));
-                        CommandResult::NewStreamRead(stream, rx)
+                        self.streams_read.insert(id, StreamState::Channel(tx));
+                        CommandResult::NewStreamRead{ id, recv: rx }
                     }
                     StreamState::NoChannel => {
                         // channel doesn't exist, create it
-                        self.streams_read.insert(stream, StreamState::Channel(tx));
+                        self.streams_read.insert(id, StreamState::Channel(tx));
                         self.process_reads(qconn)?; // force a refresh of stream which received data while having no channel
-                        CommandResult::NewStreamRead(stream, rx)
+                        CommandResult::NewStreamRead{ id, recv: rx }
                     },
                     StreamState::Channel(_) => CommandResult::StreamAlreadyCreated,
                     StreamState::Closed => CommandResult::StreamAlreadyClosed,
                 };
                 self.send_read.send(response).await?;
             },
-            Some(Command::NewStreamWrite(stream)) => {
+            Some(Command::NewStreamWrite{ id }) => {
                 let (tx, rx) = mpsc::channel(self.channel_buf);
 
-                let entry = self.streams_write.entry(stream).or_insert(StreamState::NotCreated);
+                let entry = self.streams_write.entry(id).or_insert(StreamState::NotCreated);
 
                 let response = match entry{
                     StreamState::NotCreated | StreamState::NoChannel => {
                         // channel doesn't exist, create it
-                        self.streams_write.insert(stream, StreamState::Channel((vec![], rx)));
-                        CommandResult::NewStreamWrite(stream, tx)
+                        self.streams_write.insert(id, StreamState::Channel((vec![], rx)));
+                        CommandResult::NewStreamWrite{ id, send: tx }
                     }
                     StreamState::Channel(_) => CommandResult::StreamAlreadyCreated,
                     StreamState::Closed => CommandResult::StreamAlreadyClosed,

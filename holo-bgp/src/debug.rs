@@ -7,6 +7,7 @@
 use std::net::IpAddr;
 
 use holo_utils::ibus::IbusMsg;
+use holo_utils::ip::AddressFamily;
 use ipnetwork::IpNetwork;
 use tracing::{debug, debug_span};
 
@@ -15,6 +16,12 @@ use crate::packet::consts::AttrType;
 use crate::packet::error::AttrError;
 use crate::packet::message::Message;
 use crate::rib::Route;
+
+#[derive(Debug)]
+pub enum TransportType{
+    TCP,
+    QUIC
+}
 
 // BGP debug messages.
 #[derive(Debug)]
@@ -32,6 +39,7 @@ pub enum Debug<'a> {
     BestPathNotFound(IpNetwork),
     NhtUpdate(IpAddr, Option<u32>),
     IbusRx(&'a IbusMsg),
+    CreatedTransport(TransportType, AddressFamily)
 }
 
 // Reason why an BGP instance is inactive.
@@ -48,78 +56,82 @@ impl Debug<'_> {
     pub(crate) fn log(&self) {
         match self {
             Debug::InstanceCreate
-            | Debug::InstanceDelete
-            | Debug::InstanceStart => {
-                // Parent span(s): bgp-instance
-                debug!("{}", self);
-            }
+                    | Debug::InstanceDelete
+                    | Debug::InstanceStart => {
+                        // Parent span(s): bgp-instance
+                        debug!("{}", self);
+                    }
             Debug::InstanceStop(reason) => {
-                // Parent span(s): bgp-instance
-                debug!(%reason, "{}", self);
-            }
+                        // Parent span(s): bgp-instance
+                        debug!(%reason, "{}", self);
+                    }
             Debug::NbrFsmEvent(addr, event) => {
-                // Parent span(s): bgp-instance
-                debug_span!("neighbor", %addr).in_scope(|| {
-                    debug_span!("fsm").in_scope(|| {
-                        debug!(?event, "{}", self);
-                    })
-                });
-            }
+                        // Parent span(s): bgp-instance
+                        debug_span!("neighbor", %addr).in_scope(|| {
+                            debug_span!("fsm").in_scope(|| {
+                                debug!(?event, "{}", self);
+                            })
+                        });
+                    }
             Debug::NbrFsmTransition(addr, old_state, new_state) => {
-                // Parent span(s): bgp-instance
-                debug_span!("neighbor", %addr).in_scope(|| {
-                    debug_span!("fsm").in_scope(|| {
-                        debug!(?old_state, ?new_state, "{}", self);
-                    })
-                });
-            }
+                        // Parent span(s): bgp-instance
+                        debug_span!("neighbor", %addr).in_scope(|| {
+                            debug_span!("fsm").in_scope(|| {
+                                debug!(?old_state, ?new_state, "{}", self);
+                            })
+                        });
+                    }
             Debug::NbrMsgRx(addr, msg) => {
-                // Parent span(s): bgp-instance
-                debug_span!("neighbor", %addr).in_scope(|| {
-                    debug_span!("input").in_scope(|| {
-                        let data = serde_json::to_string(&msg).unwrap();
-                        debug!(%data, "{}", self);
-                    })
-                });
-            }
+                        // Parent span(s): bgp-instance
+                        debug_span!("neighbor", %addr).in_scope(|| {
+                            debug_span!("input").in_scope(|| {
+                                let data = serde_json::to_string(&msg).unwrap();
+                                debug!(%data, "{}", self);
+                            })
+                        });
+                    }
             Debug::NbrMsgTx(addr, msg) => {
-                // Parent span(s): bgp-instance
-                debug_span!("neighbor", %addr).in_scope(|| {
-                    debug_span!("output").in_scope(|| {
-                        let data = serde_json::to_string(&msg).unwrap();
-                        debug!(%data, "{}", self);
-                    })
-                });
-            }
+                        // Parent span(s): bgp-instance
+                        debug_span!("neighbor", %addr).in_scope(|| {
+                            debug_span!("output").in_scope(|| {
+                                let data = serde_json::to_string(&msg).unwrap();
+                                debug!(%data, "{}", self);
+                            })
+                        });
+                    }
             Debug::NbrAttrError(attr_type, action) => {
-                // Parent span(s): bgp-instance
-                debug!(?attr_type, ?action, "{}", self);
-            }
+                        // Parent span(s): bgp-instance
+                        debug!(?attr_type, ?action, "{}", self);
+                    }
             Debug::BestPathFound(prefix, route) => {
-                // Parent span(s): bgp-instance
-                debug!(%prefix, origin = ?route.origin, "{}", self);
-            }
+                        // Parent span(s): bgp-instance
+                        debug!(%prefix, origin = ?route.origin, "{}", self);
+                    }
             Debug::BestPathNotFound(prefix) => {
-                // Parent span(s): bgp-instance
-                debug!(%prefix, "{}", self);
-            }
+                        // Parent span(s): bgp-instance
+                        debug!(%prefix, "{}", self);
+                    }
             Debug::NhtUpdate(addr, metric) => {
-                // Parent span(s): bgp-instance
-                if let Some(metric) = metric {
-                    debug!(%addr, %metric, "{}", self);
-                } else {
-                    debug!(%addr, metric="unreachable", "{}", self);
-                }
-            }
+                        // Parent span(s): bgp-instance
+                        if let Some(metric) = metric {
+                            debug!(%addr, %metric, "{}", self);
+                        } else {
+                            debug!(%addr, metric="unreachable", "{}", self);
+                        }
+                    }
             Debug::IbusRx(msg) => {
-                // Parent span(s): bgp-instance
-                debug_span!("internal-bus").in_scope(|| {
-                    debug_span!("input").in_scope(|| {
-                        let data = serde_json::to_string(&msg).unwrap();
-                        debug!(%data, "{}", self);
-                    })
-                })
-            }
+                        // Parent span(s): bgp-instance
+                        debug_span!("internal-bus").in_scope(|| {
+                            debug_span!("input").in_scope(|| {
+                                let data = serde_json::to_string(&msg).unwrap();
+                                debug!(%data, "{}", self);
+                            })
+                        })
+                    }
+            Debug::CreatedTransport(transport_type, af) => {
+                        // Parent span(s): bgp-instance
+                        debug!(?transport_type, ?af, "{}", self);
+                    },
         }
     }
 }
@@ -128,41 +140,44 @@ impl std::fmt::Display for Debug<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Debug::InstanceCreate => {
-                write!(f, "instance created")
-            }
+                        write!(f, "instance created")
+                    }
             Debug::InstanceDelete => {
-                write!(f, "instance deleted")
-            }
+                        write!(f, "instance deleted")
+                    }
             Debug::InstanceStart => {
-                write!(f, "starting instance")
-            }
+                        write!(f, "starting instance")
+                    }
             Debug::InstanceStop(..) => {
-                write!(f, "stopping instance")
-            }
+                        write!(f, "stopping instance")
+                    }
             Debug::NbrFsmEvent(..) => {
-                write!(f, "event")
-            }
+                        write!(f, "event")
+                    }
             Debug::NbrFsmTransition(..) => {
-                write!(f, "state transition")
-            }
+                        write!(f, "state transition")
+                    }
             Debug::NbrMsgRx(..) | Debug::NbrMsgTx(..) => {
-                write!(f, "message")
-            }
+                        write!(f, "message")
+                    }
             Debug::NbrAttrError(..) => {
-                write!(f, "malformed attribute")
-            }
+                        write!(f, "malformed attribute")
+                    }
             Debug::BestPathFound(..) => {
-                write!(f, "best path found")
-            }
+                        write!(f, "best path found")
+                    }
             Debug::BestPathNotFound(..) => {
-                write!(f, "best path not found")
-            }
+                        write!(f, "best path not found")
+                    }
             Debug::NhtUpdate(..) => {
-                write!(f, "nexthop tracking update")
-            }
+                        write!(f, "nexthop tracking update")
+                    }
             Debug::IbusRx(..) => {
-                write!(f, "message")
-            }
+                        write!(f, "message")
+                    }
+            Debug::CreatedTransport(..) => {
+                        write!(f, "created transport")
+                    },
         }
     }
 }
