@@ -7,7 +7,7 @@
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration};
 
 use holo_protocol::{
     InstanceChannelsTx, InstanceShared, MessageReceiver, ProtocolInstance,
@@ -250,7 +250,7 @@ impl Instance {
             let router_id = state.router_id;
 
             self.stop(InstanceInactiveReason::AdminDown);
-            sleep(Duration::from_secs(5)); // TODO: find a clean way to wait for ports to be freed
+            sleep(Duration::from_secs(1)); // TODO: find a cleaner way to wait for port to be useable
             self.start(router_id);
         }
 

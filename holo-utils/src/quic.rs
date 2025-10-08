@@ -1,12 +1,16 @@
-use std::{collections::{HashMap, HashSet}, error::Error, fmt::Display, io};
+use std::{collections::{HashMap, HashSet}, error::Error, fmt::Display, io, time::Duration};
 use tokio_quiche::{metrics::{DefaultMetrics, Metrics}, quic::{connect_with_config, HandshakeInfo, QuicheConnection}, quiche::Shutdown, ApplicationOverQuic, ConnectionParams, InitialQuicConnection, QuicResult};
-use tokio::{net::UdpSocket, select, sync::mpsc::{self, error::{TryRecvError, TrySendError}, Receiver, Sender}};
+use tokio::{net::UdpSocket, select, sync::mpsc::{self, error::{TryRecvError, TrySendError}, Receiver, Sender}, time};
+use tracing::debug;
 use crate::socket::{ConnInfo, ConnInfoExt};
 
 type Data = Vec<u8>;
 
+#[derive(Debug)]
 enum Command{
     Connected,
+    PingRead,
+    PingWrite,
     OpenStreams,
     NewStreamRead{
         id: u64
@@ -16,8 +20,10 @@ enum Command{
     },
 }
 
+#[derive(Debug)]
 enum CommandResult{
     Connected,
+    Pong,
     OpenStreams(HashSet<u64>),
     NewStreamRead{
         id: u64, 
@@ -46,6 +52,7 @@ impl Display for QuicError{
 impl Error for QuicError{}
 
 pub struct QuicSocketRead{
+    server: bool,
     streams: HashMap<u64, Receiver<Data>>,
     send: Sender<Command>,
     recv: Receiver<CommandResult>
@@ -63,6 +70,17 @@ impl QuicSocketRead{
                 Some(CommandResult::NewStreamRead{ id: stream, recv: stream_handle }) => self.streams.insert(stream, stream_handle),
                 Some(_) => todo!("Should handle this impossible case"),
                 None => return Err(QuicError::ConnClosed),
+            };
+        } else {
+            // check if connection is still up
+            self.send.send(Command::PingRead)
+                .await.map_err(|_| 
+                    QuicError::ConnClosed
+                )?;
+
+            match self.recv.recv().await{
+                Some(CommandResult::Pong) => (),
+                _ => return Err(QuicError::ConnClosed),
             };
         }
 
@@ -87,9 +105,14 @@ impl QuicSocketRead{
             None => Err(QuicError::ConnClosed),
         }
     }
+
+    pub fn is_server(&self) -> bool{
+        self.server
+    }
 }
 
 pub struct QuicSocketWrite{
+    server: bool,
     streams: HashMap<u64, Sender<Data>>,
     send: Sender<Command>,
     recv: Receiver<CommandResult>
@@ -107,6 +130,17 @@ impl QuicSocketWrite{
                 Some(_) => todo!("Should handle this impossible case"),
                 None => return Err(QuicError::ConnClosed),
             };
+        } else {
+            // check if connection is still up
+            self.send.send(Command::PingWrite)
+                .await.map_err(|_| 
+                    QuicError::ConnClosed
+                )?;
+
+            match self.recv.recv().await{
+                Some(CommandResult::Pong) => (),
+                _ => return Err(QuicError::ConnClosed),
+            };
         }
 
         match self.streams.get_mut(&stream).expect("Impossible error").send(data.to_vec()).await{
@@ -118,11 +152,16 @@ impl QuicSocketWrite{
     pub fn close_stream(&mut self, stream: u64){
         self.streams.remove(&stream);
     }
+
+    pub fn is_server(&self) -> bool{
+        self.server
+    }
 }
 
 #[derive(Debug)]
 pub struct QuicSocket{
     conn_info: ConnInfo,
+    server: bool,
     send: Sender<Command>,
     recv_read: Receiver<CommandResult>,
     recv_write: Receiver<CommandResult>,
@@ -134,8 +173,19 @@ impl QuicSocket{
     }
 
     pub fn split(self) -> (QuicSocketRead, QuicSocketWrite) {
-        let reader = QuicSocketRead{ streams: HashMap::new(), send: self.send.clone(), recv: self.recv_read };
-        let writer = QuicSocketWrite{ streams: HashMap::new(), send: self.send.clone(), recv: self.recv_write };
+        let reader = QuicSocketRead{ 
+            streams: HashMap::new(), 
+            send: self.send.clone(), 
+            recv: self.recv_read, 
+            server: self.server 
+        };
+
+        let writer = QuicSocketWrite{ 
+            streams: HashMap::new(), 
+            send: self.send.clone(), 
+            recv: self.recv_write,
+            server: self.server
+        };
 
         (reader, writer)
     }
@@ -147,6 +197,10 @@ impl QuicSocket{
             Some(CommandResult::Connected) => Ok(()),
             _ => Err(QuicError::ConnClosed),
         }
+    }
+
+    pub fn is_server(&self) -> bool{
+        self.server
     }
 }
 
@@ -163,7 +217,7 @@ impl QuicSocket{
             remote_port: peer.port()
         };
 
-        let (driver, mut controller) = QuicSocket::new(conn_info);
+        let (driver, mut controller) = QuicSocket::new(conn_info, false);
         let _ = connect_with_config(socket.try_into()?, None, &params, driver).await;
 
         controller.wait_connected().await.map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "Failed to connect"))?;
@@ -179,7 +233,7 @@ impl QuicSocket{
             remote_port: conn.peer_addr().port()
         };
 
-        let (driver, mut controller) = QuicSocket::new(conn_info);
+        let (driver, mut controller) = QuicSocket::new(conn_info, true);
 
         let _ = conn.start(driver);
 
@@ -188,7 +242,7 @@ impl QuicSocket{
         Ok(controller)
     }
 
-    fn new(conn_info: ConnInfo) -> (QuicDriver, QuicSocket){
+    fn new(conn_info: ConnInfo, server: bool) -> (QuicDriver, QuicSocket){
         let channel_buf = 1024;
         let (command_tx, command_rx) = mpsc::channel(channel_buf);
         let (read_tx, read_rx) = mpsc::channel(channel_buf);
@@ -196,6 +250,7 @@ impl QuicSocket{
 
         let driver = QuicDriver {
             buf: [0; 4096], 
+            info: conn_info.clone(),
             channel_buf,
             streams_read: HashMap::new(),
             streams_write: HashMap::new(),
@@ -207,6 +262,7 @@ impl QuicSocket{
 
         let socket = QuicSocket{ 
             conn_info, 
+            server,
             send: command_tx,
             recv_read: read_rx,
             recv_write: write_rx
@@ -225,6 +281,7 @@ impl ConnInfoExt for QuicSocket{
 enum StreamState<T>{
     NotCreated,
     NoChannel,
+    ChannelNotReadableYet(T),
     Channel(T),
     Closed
 }
@@ -237,6 +294,7 @@ enum DriverState{
 
 pub struct QuicDriver{
     buf: [u8; 4096],
+    info: ConnInfo,
     channel_buf: usize,
     streams_read: HashMap<u64, StreamState<Sender<Data>>>,
     streams_write: HashMap<u64, StreamState<(Data, Receiver<Data>)>>,
@@ -248,6 +306,7 @@ pub struct QuicDriver{
 
 impl QuicDriver{
     async fn process_msg(&mut self, msg: Option<Command>, qconn: &mut QuicheConnection) -> QuicResult<()>{
+        debug!(conn = %self.info, ?msg, "Processing message");
         match msg {
             Some(Command::NewStreamRead{ id }) => {
                 let (tx, rx) = mpsc::channel(self.channel_buf);
@@ -255,17 +314,17 @@ impl QuicDriver{
 
                 let response = match entry{
                     StreamState::NotCreated => {
-                        // channel doesn't exist, create it
-                        self.streams_read.insert(id, StreamState::Channel(tx));
+                        // channel doesn't exist and stream not readable yet, create only the channel
+                        self.streams_read.insert(id, StreamState::ChannelNotReadableYet(tx));
                         CommandResult::NewStreamRead{ id, recv: rx }
                     }
                     StreamState::NoChannel => {
-                        // channel doesn't exist, create it
+                        // channel doesn't exist and stream is readable, create it
                         self.streams_read.insert(id, StreamState::Channel(tx));
                         self.process_reads(qconn)?; // force a refresh of stream which received data while having no channel
                         CommandResult::NewStreamRead{ id, recv: rx }
                     },
-                    StreamState::Channel(_) => CommandResult::StreamAlreadyCreated,
+                    StreamState::Channel(_) | StreamState::ChannelNotReadableYet(_) => CommandResult::StreamAlreadyCreated,
                     StreamState::Closed => CommandResult::StreamAlreadyClosed,
                 };
                 self.send_read.send(response).await?;
@@ -281,7 +340,7 @@ impl QuicDriver{
                         self.streams_write.insert(id, StreamState::Channel((vec![], rx)));
                         CommandResult::NewStreamWrite{ id, send: tx }
                     }
-                    StreamState::Channel(_) => CommandResult::StreamAlreadyCreated,
+                    StreamState::Channel(_) | StreamState::ChannelNotReadableYet(_) => CommandResult::StreamAlreadyCreated,
                     StreamState::Closed => CommandResult::StreamAlreadyClosed,
                 };
                 self.send_write.send(response).await?;
@@ -295,12 +354,19 @@ impl QuicDriver{
             },
             Some(Command::Connected) => {
                 self.send_read.send(CommandResult::Connected).await?;
+            },
+            Some(Command::PingRead) => {
+                self.send_read.send(CommandResult::Pong).await?;
+            },
+            Some(Command::PingWrite) => {
+                self.send_write.send(CommandResult::Pong).await?;
             }
             None => { 
                 if !qconn.is_closed(){
                     qconn.close(true, 0, "Connection closed".as_bytes())?; 
                 }
                 self.state = DriverState::Exit;
+                debug!(conn = %self.info, "QUIC driver exiting");
             }
         }
 
@@ -312,6 +378,7 @@ impl ApplicationOverQuic for QuicDriver{
     fn on_conn_established(
         &mut self, _qconn: &mut QuicheConnection, _handshake_info: &HandshakeInfo,
     ) -> QuicResult<()> {
+        debug!(conn = %self.info, "QUIC connection established");
         self.state = DriverState::Started;
         QuicResult::Ok(())
     }
@@ -327,10 +394,14 @@ impl ApplicationOverQuic for QuicDriver{
     async fn wait_for_data(
         &mut self, qconn: &mut QuicheConnection,
     ) -> QuicResult<()> {
+        let mut interval = time::interval(Duration::from_millis(1));
+        interval.tick().await; // first tick completes immediately
         select! {
             msg = self.recv.recv() => {
                 self.process_msg(msg, qconn).await?;
             }
+            // wake at least every 1ms to check for presence of write data on channels
+            _ = interval.tick() => {}
         };
 
         Ok(())
@@ -340,7 +411,12 @@ impl ApplicationOverQuic for QuicDriver{
         let mut buf = [0; 65536];
 
         while let Some(stream) = qconn.stream_readable_next(){
-            self.streams_read.entry(stream).or_insert(StreamState::NoChannel);
+            let entry = self.streams_read.entry(stream).or_insert(StreamState::NoChannel);
+            if let StreamState::ChannelNotReadableYet(chan) = entry{
+                debug!(conn = %self.info, stream, "Stream became readable");
+                // stream is now readable, we can read from stream into the channel
+                *entry = StreamState::Channel(chan.clone()); 
+            }
         }
 
         let streams = self.streams_read.iter_mut().filter(|(_, status)| matches!(status, StreamState::Channel(_)));
@@ -357,6 +433,8 @@ impl ApplicationOverQuic for QuicDriver{
                         None
                     }
                 };
+
+                debug!(conn = %self.info, stream, "Reading stream");
 
                 if let Some(slot) = slot{
                     match qconn.stream_recv(*stream, &mut buf){
@@ -381,6 +459,7 @@ impl ApplicationOverQuic for QuicDriver{
         for (stream, state) in &mut self.streams_write{
             if let StreamState::Channel((buffered_data, rx)) = state{
                 if buffered_data.len() > 0{
+                    debug!(conn = %self.info, stream, "Writing buffered data on stream");
                     let written = qconn.stream_send(*stream, &buffered_data, false)?;
                     *buffered_data = buffered_data.drain(..written).collect();
                     if buffered_data.len() > 0{
@@ -390,12 +469,15 @@ impl ApplicationOverQuic for QuicDriver{
 
                 match rx.try_recv(){
                     Ok(data) => {
+                        debug!(conn = %self.info, stream, "Writing new data on stream");
                         let written = qconn.stream_send(*stream, &data, false)?;
                         if written < data.len(){
+                            debug!(conn = %self.info, stream, "Buffering data on stream");
                             buffered_data.extend_from_slice(&data[written..]);
                         }
                     },
                     Err(TryRecvError::Disconnected) => {
+                        debug!(conn = %self.info, stream, "Closing stream");
                         qconn.stream_send(*stream, "".as_bytes(), true)?;
                         *state = StreamState::Closed;
                     },
@@ -409,8 +491,8 @@ impl ApplicationOverQuic for QuicDriver{
 
     fn on_conn_close<M: Metrics>(
         &mut self, _qconn: &mut QuicheConnection, _metrics: &M,
-        _connection_result: &QuicResult<()>,
+        connection_result: &QuicResult<()>,
     ) {
-        //println!("Connection closed: {:?}", connection_result);
+        debug!(conn = %self.info, result = ?connection_result, "Connection closed");
     }
 }

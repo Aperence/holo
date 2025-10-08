@@ -4,6 +4,7 @@
 // SPDX-License-Identifier: MIT
 //
 
+use std::fmt::Display;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::raw::{c_int, c_ushort, c_void};
 use std::os::unix::io::AsRawFd;
@@ -34,6 +35,12 @@ pub struct ConnInfo {
     pub local_port: u16,
     pub remote_addr: IpAddr,
     pub remote_port: u16,
+}
+
+impl Display for ConnInfo{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "([{}]:{} -> [{}]:{})", self.local_addr, self.local_port, self.remote_addr, self.remote_port)
+    }
 }
 
 // FFI struct used to set the TCP_MD5SIG socket option.

@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::time::Duration;
 
 use holo_utils::capabilities;
 use holo_utils::ip::{AddressFamily, IpAddrExt, IpAddrKind};
@@ -16,6 +17,7 @@ use holo_utils::socket::{
     QuicSocket, QuicSocketRead, QuicSocketWrite, Domain, Type, SockAddr
 };
 use tokio_quiche::{listen, metrics::DefaultMetrics, settings::{Hooks, TlsCertificatePaths, CertificateKind, QuicSettings, ConnectionParams}, quic::SimpleConnectionIdGenerator};
+use tokio::time::sleep;
 use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{Sender, UnboundedReceiver};
 
@@ -27,6 +29,8 @@ use crate::tasks::messages::input::{NbrRxMsg, QuicAcceptMsg};
 use crate::tasks::messages::output::NbrTxMsg;
 
 const BGP_PORT: u16 = 179;
+const CLIENT_STREAM: u64 = 0x02;
+const SERVER_STREAM: u64 = 0x03;
 
 // ===== global functions =====
 
@@ -231,16 +235,17 @@ pub(crate) async fn connect(
 
 #[cfg(not(feature = "testing"))]
 pub(crate) async fn nbr_write_loop(
-    mut stream: QuicSocketWrite,
+    mut conn: QuicSocketWrite,
     mut cxt: EncodeCxt,
     mut nbr_msg_txc: UnboundedReceiver<NbrTxMsg>,
 ) {
+    let stream = if conn.is_server() { SERVER_STREAM } else { CLIENT_STREAM };
     while let Some(msg) = nbr_msg_txc.recv().await {
         match msg {
             // Send message to the peer.
             NbrTxMsg::SendMessage { msg, .. } => {
                 let buf = msg.encode(&cxt);
-                if let Err(_) = stream.write_stream(&buf, 0).await {
+                if let Err(_) = conn.write_stream(&buf, stream).await {
                     IoError::QuicSendError(io::Error::new(io::ErrorKind::BrokenPipe, "")).log();
                 }
             }
@@ -248,7 +253,7 @@ pub(crate) async fn nbr_write_loop(
             NbrTxMsg::SendMessageList { msg_list, .. } => {
                 for msg in msg_list {
                     let buf = msg.encode(&cxt);
-                    if let Err(_) = stream.write_stream(&buf, 0).await {
+                    if let Err(_) = conn.write_stream(&buf, stream).await {
                         IoError::QuicSendError(io::Error::new(io::ErrorKind::BrokenPipe, "")).log();
                     }
                 }
@@ -261,17 +266,18 @@ pub(crate) async fn nbr_write_loop(
 
 #[cfg(not(feature = "testing"))]
 pub(crate) async fn nbr_read_loop(
-    mut stream: QuicSocketRead,
+    mut conn: QuicSocketRead,
     nbr_addr: IpAddr,
     mut cxt: DecodeCxt,
     nbr_msg_rxp: Sender<NbrRxMsg>,
 ) -> Result<(), SendError<NbrRxMsg>> {
     const BUF_SIZE: usize = 65535;
     let mut data = Vec::with_capacity(BUF_SIZE);
+    let stream = if conn.is_server() { CLIENT_STREAM } else { SERVER_STREAM };
 
     loop {
         // Read data from the network.
-        match stream.read_stream(0).await {
+        match conn.read_stream(stream).await {
             Ok(buf) => data.extend_from_slice(&buf),
             Err(QuicError::ConnClosed) => {
                 // Notify that the connection was closed by the remote end.
@@ -282,8 +288,9 @@ pub(crate) async fn nbr_read_loop(
                 nbr_msg_rxp.send(msg).await?;
                 return Ok(());
             }
-            Err(_) => {
-                IoError::QuicRecvError(io::Error::new(io::ErrorKind::BrokenPipe, "")).log();
+            Err(err) => {
+                IoError::QuicRecvError(io::Error::new(io::ErrorKind::BrokenPipe, format!("{}", err))).log();
+                sleep(Duration::from_millis(10)).await;
                 continue;
             }
         };

@@ -581,10 +581,10 @@ impl Neighbor {
         conn_info: ConnInfo,
         instance: &mut InstanceUpView<'_>,
     ) {
-        // Store TCP connection information.
+        // Store QUIC connection information.
         self.conn_info = Some(conn_info);
 
-        // Split TCP stream into two halves.
+        // Split QUIC stream into two halves.
         let (read_half, write_half) = conn.split();
 
         // Spawn neighbor QUIC Tx task.
@@ -602,7 +602,7 @@ impl Neighbor {
         );
         self.msg_txp = Some(msg_txp);
 
-        // Spawn neighbor TCP Rx task.
+        // Spawn neighbor QUIC Rx task.
         let cxt = DecodeCxt {
             peer_type: self.peer_type,
             peer_as: self.config.peer_as,
